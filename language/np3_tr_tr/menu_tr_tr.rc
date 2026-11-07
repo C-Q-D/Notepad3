@@ -145,7 +145,7 @@ BEGIN
         MENUITEM "&Masaüstünde kısayol oluştur",                      IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "Göz a&t...\tCtrl+M",                                IDM_FILE_BROWSE
-        MENUITEM "Open Fo&lder...",                                   IDM_FILE_OPENFOLDER
+        MENUITEM "Op&en Folder...",                                   IDM_FILE_OPENFOLDER
         POPUP "&Sık kullanılanlar"
         BEGIN
             MENUITEM "Sık kullanılanları &aç...\tAlt+I",              IDM_FILE_OPENFAV

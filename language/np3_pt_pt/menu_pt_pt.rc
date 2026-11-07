@@ -145,7 +145,7 @@ BEGIN
         MENUITEM "Criar ligação ao ambiente &de trabalho", IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "&Procurar...\tCtrl+M",                   IDM_FILE_BROWSE
-        MENUITEM "Open Fo&lder...",                        IDM_FILE_OPENFOLDER
+        MENUITEM "Op&en Folder...",                        IDM_FILE_OPENFOLDER
         POPUP "&Favoritos"
         BEGIN
             MENUITEM "Abrir Fav&oritos...\tAlt+I",             IDM_FILE_OPENFAV

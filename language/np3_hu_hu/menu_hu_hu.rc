@@ -441,7 +441,7 @@ BEGIN
             MENUITEM "Menü&sor megjelenítése",                  IDM_VIEW_MENUBAR
             MENUITEM "Esz&köztár megjelenítése",                IDM_VIEW_TOOLBAR
             MENUITEM "Állapotso&r megjelenítése",               IDM_VIEW_STATUSBAR
-            MENUITEM "Show Side&bar\tAlt+Shift+B",              IDM_VIEW_SIDEBAR
+            MENUITEM "S&how Sidebar\tAlt+Shift+B",              IDM_VIEW_SIDEBAR
             MENUITEM SEPARATOR
             MENUITEM "Eszköztár té&ma betöltése...",            IDM_VIEW_LOADTHEMETB
             MENUITEM "Eszköztár testresza&bása...",             IDM_VIEW_CUSTOMIZETB

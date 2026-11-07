@@ -145,7 +145,7 @@ BEGIN
         MENUITEM "Vytvoriť &zástupcu na Ploche",           IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "Pre&hľadávať...\tCtrl+M",                 IDM_FILE_BROWSE
-        MENUITEM "Open Fo&lder...",                         IDM_FILE_OPENFOLDER
+        MENUITEM "Open &Folder...",                         IDM_FILE_OPENFOLDER
         POPUP "O&bľúbené súbory"
         BEGIN
             MENUITEM "Otvor&iť Obľúbené...\tAlt+I",         IDM_FILE_OPENFAV

@@ -145,7 +145,7 @@ BEGIN
         MENUITEM "डेस्कटॉप पर लिंक बनाएं (&K)",            IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "खोजें (&B)...\tCtrl+M",              IDM_FILE_BROWSE
-        MENUITEM "Open Fo&lder...",                    IDM_FILE_OPENFOLDER
+        MENUITEM "Open Folder...",                    IDM_FILE_OPENFOLDER
         POPUP "पसंदीदा (&F)"
         BEGIN
             MENUITEM "पसंदीदा खोलें (&O)...\tAlt+I",    IDM_FILE_OPENFAV

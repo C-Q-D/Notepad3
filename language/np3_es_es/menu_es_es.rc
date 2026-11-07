@@ -145,7 +145,7 @@ BEGIN
         MENUITEM "Crear acceso directo en el escri&torio",  IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "&Mini explorador externo...\tCtrl+M",     IDM_FILE_BROWSE
-        MENUITEM "Open Fo&lder...",                         IDM_FILE_OPENFOLDER
+        MENUITEM "O&pen Folder...",                         IDM_FILE_OPENFOLDER
         POPUP "Fa&voritos"
         BEGIN
             MENUITEM "Abrir favor&itos...\tAlt+I",          IDM_FILE_OPENFAV

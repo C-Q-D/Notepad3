@@ -145,7 +145,7 @@ BEGIN
         MENUITEM "Tạo liên kết trên màn hình nền(&K)",           IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "Duyệt(&B)...\tCtrl+M",                         IDM_FILE_BROWSE
-        MENUITEM "Open Fo&lder...",                              IDM_FILE_OPENFOLDER
+        MENUITEM "Open Folder...",                              IDM_FILE_OPENFOLDER
         POPUP "Yêu thích(&F)"
         BEGIN
             MENUITEM "Mở yêu thích(&O)...\tAlt+I",               IDM_FILE_OPENFAV

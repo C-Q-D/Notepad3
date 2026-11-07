@@ -145,7 +145,7 @@ BEGIN
         MENUITEM "デスクトップにショートカット(&K)",                  IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "ファイラで開く(&B)...\tCtrl+M",               IDM_FILE_BROWSE
-        MENUITEM "Open Fo&lder...",                      IDM_FILE_OPENFOLDER
+        MENUITEM "Open Folder...",                      IDM_FILE_OPENFOLDER
         POPUP "お気に入り(&F)"
         BEGIN
             MENUITEM "お気に入りを開く(&O)...\tAlt+I",           IDM_FILE_OPENFAV

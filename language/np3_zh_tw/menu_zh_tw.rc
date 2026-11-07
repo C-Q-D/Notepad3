@@ -145,7 +145,7 @@ BEGIN
         MENUITEM "建立桌面連結(&K)",                          IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "瀏覽(&B)...\tCtrl+M",                       IDM_FILE_BROWSE
-        MENUITEM "Open Fo&lder...",                         IDM_FILE_OPENFOLDER
+        MENUITEM "Open Folder...",                         IDM_FILE_OPENFOLDER
         POPUP "常用(&F)"
         BEGIN
             MENUITEM "開啟常用(&O)...\tAlt+I",              IDM_FILE_OPENFAV

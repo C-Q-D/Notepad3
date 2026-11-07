@@ -145,7 +145,7 @@ BEGIN
         MENUITEM "Skep &Desktop Link",                      IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "&Snuffel...\tCtrl+M",                     IDM_FILE_BROWSE
-        MENUITEM "Open Fo&lder...",                         IDM_FILE_OPENFOLDER
+        MENUITEM "Open &Folder...",                         IDM_FILE_OPENFOLDER
         POPUP "&Gunstelinge"
         BEGIN
             MENUITEM "Maak Gunstelinge &Oop...\tAlt+I",     IDM_FILE_OPENFAV

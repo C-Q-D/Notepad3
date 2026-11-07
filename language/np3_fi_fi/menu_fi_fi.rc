@@ -145,7 +145,7 @@ BEGIN
         MENUITEM "Luo työpöytälin&kki",             IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "&Selaa...\tCtrl+M",               IDM_FILE_BROWSE
-        MENUITEM "Open Fo&lder...",                 IDM_FILE_OPENFOLDER
+        MENUITEM "&Open Folder...",                 IDM_FILE_OPENFOLDER
         POPUP "&Suosikit"
         BEGIN
             MENUITEM "&Avaa suosikit...\tAlt+I",             IDM_FILE_OPENFAV

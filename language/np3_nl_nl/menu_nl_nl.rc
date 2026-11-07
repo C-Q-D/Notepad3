@@ -145,7 +145,7 @@ BEGIN
         MENUITEM "&Bureaubladsnelkoppeling aanmaken",               IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "MiniPath &verkenner...\tCtrl+M",                  IDM_FILE_BROWSE
-        MENUITEM "Open Fo&lder...",                                 IDM_FILE_OPENFOLDER
+        MENUITEM "Open Folde&r...",                                 IDM_FILE_OPENFOLDER
         POPUP "&Favorieten"
         BEGIN
             MENUITEM "Favorieten &openen...\tAlt+I",                IDM_FILE_OPENFAV
