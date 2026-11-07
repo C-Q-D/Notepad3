@@ -709,6 +709,9 @@ typedef struct SETTINGS_T {
     bool ShowMenubar;
     bool ShowToolbar;
     bool ShowStatusbar;
+    bool ShowSidebar;
+    int  SidebarWidth;       // Logical pixels at 96 DPI.
+    HPATHL SidebarFolder;    // Owned path; empty means no folder selected.
     int  ToolBarTheme;
     bool DpiScaleToolBar;
     int  EncodingDlgSizeX;

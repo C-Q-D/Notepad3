@@ -1695,6 +1695,14 @@ void LoadSettings()
         Path_Reset(Settings.OpenWithDir, Path_Get(Paths.ModuleDirectory));
     }
 
+    LPWSTR const sidebarFolder = Path_WriteAccessBuf(Settings.SidebarFolder, PATHLONG_MAX_CCH);
+    IniSectionGetStringNoQuotes(IniSecSettings, L"SidebarFolder", L"", sidebarFolder, PATHLONG_MAX_CCH);
+    Path_Sanitize(Settings.SidebarFolder);
+    Path_FreeExtra(Settings.SidebarFolder, 0);
+    if (Path_IsNotEmpty(Settings.SidebarFolder)) {
+        Path_AbsoluteFromApp(Settings.SidebarFolder, true);
+    }
+
     if (Path_GetKnownFolder(FOLDERID_Favorites, Defaults.FavoritesDir)) {
         LPWSTR const wchFavoritesDir = Path_WriteAccessBuf(Settings.FavoritesDir, PATHLONG_MAX_CCH);
         if (IniSectionGetStringNoQuotes(IniSecSettings, L"Favorites", Path_Get(Defaults.FavoritesDir), wchFavoritesDir, PATHLONG_MAX_CCH)) {
@@ -1894,6 +1902,8 @@ void LoadSettings()
     GET_BOOL_VALUE_FROM_INISECTION(ShowMenubar, true);
     GET_BOOL_VALUE_FROM_INISECTION(ShowToolbar, true);
     GET_BOOL_VALUE_FROM_INISECTION(ShowStatusbar, true);
+    GET_BOOL_VALUE_FROM_INISECTION(ShowSidebar, false);
+    GET_INT_VALUE_FROM_INISECTION(SidebarWidth, 240, 100, 4000);
 
     GET_INT_VALUE_FROM_INISECTION(EncodingDlgSizeX, 340, INT_MIN, INT_MAX);
     GET_INT_VALUE_FROM_INISECTION(EncodingDlgSizeY, 292, INT_MIN, INT_MAX);
@@ -2182,6 +2192,13 @@ static bool _SaveSettings(bool bForceSaveSettings)
     }
 
     HPATHL hpth = Path_Allocate(NULL);
+    if (Path_IsNotEmpty(Settings.SidebarFolder)) {
+        Path_Reset(hpth, Path_Get(Settings.SidebarFolder));
+        Path_RelativeToApp(hpth, false, true, Flags.PortableMyDocs);
+        IniSectionSetString(IniSecSettings, L"SidebarFolder", Path_Get(hpth));
+    } else {
+        IniSectionDelete(IniSecSettings, L"SidebarFolder", false);
+    }
     if (StringCchCompareXI(Path_Get(Settings.OpenWithDir), Path_Get(Defaults.OpenWithDir)) != 0) {
         Path_Reset(hpth, Path_Get(Settings.OpenWithDir));
         Path_RelativeToApp(hpth, false, true, Flags.PortableMyDocs);
@@ -2354,6 +2371,8 @@ static bool _SaveSettings(bool bForceSaveSettings)
     SAVE_VALUE_IF_NOT_EQ_DEFAULT(Bool, ShowMenubar);
     SAVE_VALUE_IF_NOT_EQ_DEFAULT(Bool, ShowToolbar);
     SAVE_VALUE_IF_NOT_EQ_DEFAULT(Bool, ShowStatusbar);
+    SAVE_VALUE_IF_NOT_EQ_DEFAULT(Bool, ShowSidebar);
+    SAVE_VALUE_IF_NOT_EQ_DEFAULT(Int, SidebarWidth);
 
     SAVE_VALUE_IF_NOT_EQ_DEFAULT(Int, EncodingDlgSizeX);
     SAVE_VALUE_IF_NOT_EQ_DEFAULT(Int, EncodingDlgSizeY);

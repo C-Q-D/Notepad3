@@ -950,6 +950,8 @@ static void _InitGlobals()
     Defaults.OpenWithDir = Path_Allocate(NULL);
     Settings.FavoritesDir = Path_Allocate(NULL);
     Defaults.FavoritesDir = Path_Allocate(NULL);
+    Settings.SidebarFolder = Path_Allocate(NULL);
+    Defaults.SidebarFolder = Path_Allocate(NULL);
     Settings.DefaultDirectoryOverride = Path_Allocate(NULL);
     Defaults.DefaultDirectoryOverride = Path_Allocate(NULL);
 
@@ -1153,6 +1155,8 @@ static void _CleanUpResources(const HWND hwnd, bool bIsInitialized)
     Path_Release(Defaults.DefaultDirectoryOverride);
     Path_Release(Settings.FavoritesDir);
     Path_Release(Defaults.FavoritesDir);
+    Path_Release(Settings.SidebarFolder);
+    Path_Release(Defaults.SidebarFolder);
     Path_Release(Settings.OpenWithDir);
     Path_Release(Defaults.OpenWithDir);
 

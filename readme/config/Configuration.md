@@ -30,6 +30,18 @@ These settings are managed through Notepad3's user interface (Menu → Settings)
 
 #### `Favorites=%APPDATA%\Rizonesoft\Notepad3\Favorites\`
 
+#### `ShowSidebar=0`
+
+Show the folder tree beside the editor (`0` or `1`, default `0`). Toggle it with View → Panels → Show Sidebar or **Alt+Shift+B**.
+
+#### `SidebarWidth=240`
+
+Sidebar width in logical pixels at 96 DPI (range 100–4000). Layout scales this width for the monitor and reserves at least 200 logical pixels for the editor when the window is wide enough.
+
+#### `SidebarFolder=`
+
+Last folder selected for the sidebar. Default: empty. Paths use the same relative-to-application and environment expansion rules as `OpenWithDir`. Restart restores the root folder, visibility, and width; expanded nodes and selection are not persisted.
+
 #### `AnalyzeReliableConfidenceLevel=50`
 
 Confidence threshold (0–100) for the encoding analysis reliability indicator. Configurable in Menu → Settings → Encoding Defaults, next to "Perform ANSI Code Page analysis".
