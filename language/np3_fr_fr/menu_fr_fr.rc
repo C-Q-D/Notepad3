@@ -145,6 +145,7 @@ BEGIN
         MENUITEM "Créer un lien vers le bureau",          IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "Mini navigateur interne…\tCtrl+M",      IDM_FILE_BROWSE
+        MENUITEM "Open Fo&lder...",                       IDM_FILE_OPENFOLDER
         POPUP "Fa&voris"
         BEGIN
             MENUITEM "&Ouvrir les favoris…\tAlt+I",        IDM_FILE_OPENFAV
@@ -440,6 +441,7 @@ BEGIN
             MENUITEM "Afficher la barre de menus",          IDM_VIEW_MENUBAR
             MENUITEM "&Afficher la barre d'outils",         IDM_VIEW_TOOLBAR
             MENUITEM "Affic&her la barre d'état",           IDM_VIEW_STATUSBAR
+            MENUITEM "Show Side&bar\tAlt+Shift+B",          IDM_VIEW_SIDEBAR
             MENUITEM SEPARATOR
             MENUITEM "&Charger le thème de la barre d'outils…",  IDM_VIEW_LOADTHEMETB
             MENUITEM "Personnaliser la barre d'outils…",         IDM_VIEW_CUSTOMIZETB

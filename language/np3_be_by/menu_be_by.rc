@@ -145,6 +145,7 @@ BEGIN
         MENUITEM "Дадаць цэтлік на Працоўны стол",  IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "А&гляд...\tCtrl+M",               IDM_FILE_BROWSE
+        MENUITEM "Open Fo&lder...",                 IDM_FILE_OPENFOLDER
         POPUP "Абрана&е"
         BEGIN
             MENUITEM "&Адкрыць...\tAlt+I",          IDM_FILE_OPENFAV
@@ -440,6 +441,7 @@ BEGIN
             MENUITEM "Паказаць паліцу &меню",         IDM_VIEW_MENUBAR
             MENUITEM "Паказаць &паліцу прыладаў",     IDM_VIEW_TOOLBAR
             MENUITEM "Паказаць &радок стану",         IDM_VIEW_STATUSBAR
+            MENUITEM "Show Side&bar\tAlt+Shift+B",    IDM_VIEW_SIDEBAR
             MENUITEM SEPARATOR
             MENUITEM "&Вызначыць тэму паліцы...",     IDM_VIEW_LOADTHEMETB
             MENUITEM "&Наладзіць паліцу прыладаў...", IDM_VIEW_CUSTOMIZETB

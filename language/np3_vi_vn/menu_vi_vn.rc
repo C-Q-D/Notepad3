@@ -145,6 +145,7 @@ BEGIN
         MENUITEM "Tạo liên kết trên màn hình nền(&K)",           IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "Duyệt(&B)...\tCtrl+M",                         IDM_FILE_BROWSE
+        MENUITEM "Open Fo&lder...",                              IDM_FILE_OPENFOLDER
         POPUP "Yêu thích(&F)"
         BEGIN
             MENUITEM "Mở yêu thích(&O)...\tAlt+I",               IDM_FILE_OPENFAV
@@ -440,6 +441,7 @@ BEGIN
             MENUITEM "Hiển thị thanh menu",                      IDM_VIEW_MENUBAR
             MENUITEM "Hiển thị thanh công cụ(&T)",                IDM_VIEW_TOOLBAR
             MENUITEM "Hiển thị thanh trạng thái(&S)",            IDM_VIEW_STATUSBAR
+            MENUITEM "Show Side&bar\tAlt+Shift+B",               IDM_VIEW_SIDEBAR
             MENUITEM SEPARATOR
             MENUITEM "Tải chủ đề thanh công cụ(&L)...",           IDM_VIEW_LOADTHEMETB
             MENUITEM "Tùy chỉnh thanh công cụ(&U)...",            IDM_VIEW_CUSTOMIZETB

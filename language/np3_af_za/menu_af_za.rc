@@ -145,6 +145,7 @@ BEGIN
         MENUITEM "Skep &Desktop Link",                      IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "&Snuffel...\tCtrl+M",                     IDM_FILE_BROWSE
+        MENUITEM "Open Fo&lder...",                         IDM_FILE_OPENFOLDER
         POPUP "&Gunstelinge"
         BEGIN
             MENUITEM "Maak Gunstelinge &Oop...\tAlt+I",     IDM_FILE_OPENFAV
@@ -440,6 +441,7 @@ BEGIN
             MENUITEM "Wys &Menubalk",                       IDM_VIEW_MENUBAR
             MENUITEM "Wys &Nutsbalk",                       IDM_VIEW_TOOLBAR
             MENUITEM "Wys &Statusbalk",                     IDM_VIEW_STATUSBAR
+            MENUITEM "Show Side&bar\tAlt+Shift+B",          IDM_VIEW_SIDEBAR
             MENUITEM SEPARATOR
             MENUITEM "&Laai Toolbar Tema...",               IDM_VIEW_LOADTHEMETB
             MENUITEM "Pas&maak Nutsbalk...",                IDM_VIEW_CUSTOMIZETB

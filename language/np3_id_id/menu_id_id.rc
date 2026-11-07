@@ -145,6 +145,7 @@ BEGIN
         MENUITEM "Buat Pintasan ke &Dekstop",        IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "Telu&suri...\tCtrl+M",             IDM_FILE_BROWSE
+        MENUITEM "Open Fo&lder...",                  IDM_FILE_OPENFOLDER
         POPUP "Fa&vorit"
         BEGIN
             MENUITEM "&Buka Favorit...\tAlt+I",      IDM_FILE_OPENFAV
@@ -440,6 +441,7 @@ BEGIN
             MENUITEM "Tampilkan Bilah &Menu",                IDM_VIEW_MENUBAR
             MENUITEM "Tampilkan Bilah A&lat",                IDM_VIEW_TOOLBAR
             MENUITEM "Tampilkan Bilah &Status",              IDM_VIEW_STATUSBAR
+            MENUITEM "Show Side&bar\tAlt+Shift+B",           IDM_VIEW_SIDEBAR
             MENUITEM SEPARATOR
             MENUITEM "Muat &Tema Bilah Alat...",             IDM_VIEW_LOADTHEMETB
             MENUITEM "&Sesuaikan Bilah Alat...",             IDM_VIEW_CUSTOMIZETB

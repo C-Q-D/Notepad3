@@ -145,6 +145,7 @@ BEGIN
         MENUITEM "&Bureaubladsnelkoppeling aanmaken",               IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "MiniPath &verkenner...\tCtrl+M",                  IDM_FILE_BROWSE
+        MENUITEM "Open Fo&lder...",                                 IDM_FILE_OPENFOLDER
         POPUP "&Favorieten"
         BEGIN
             MENUITEM "Favorieten &openen...\tAlt+I",                IDM_FILE_OPENFAV
@@ -440,6 +441,7 @@ BEGIN
             MENUITEM "&Menubalk weergeven",                         IDM_VIEW_MENUBAR
             MENUITEM "&Werkbalk weergeven",                         IDM_VIEW_TOOLBAR
             MENUITEM "&Statusbalk weergeven",                       IDM_VIEW_STATUSBAR
+            MENUITEM "Show Side&bar\tAlt+Shift+B",                  IDM_VIEW_SIDEBAR
             MENUITEM SEPARATOR
             MENUITEM "Werkbalkthema &laden...",                     IDM_VIEW_LOADTHEMETB
             MENUITEM "Werkbal&k aanpassen...",                      IDM_VIEW_CUSTOMIZETB

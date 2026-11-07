@@ -145,6 +145,7 @@ BEGIN
         MENUITEM "建立桌面連結(&K)",                          IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "瀏覽(&B)...\tCtrl+M",                       IDM_FILE_BROWSE
+        MENUITEM "Open Fo&lder...",                         IDM_FILE_OPENFOLDER
         POPUP "常用(&F)"
         BEGIN
             MENUITEM "開啟常用(&O)...\tAlt+I",              IDM_FILE_OPENFAV
@@ -440,6 +441,7 @@ BEGIN
             MENUITEM "顯示功能表列(&M)",                     IDM_VIEW_MENUBAR
             MENUITEM "顯示工具列(&T)",                       IDM_VIEW_TOOLBAR
             MENUITEM "顯示狀態列(&S)",                       IDM_VIEW_STATUSBAR
+            MENUITEM "Show Side&bar\tAlt+Shift+B",      IDM_VIEW_SIDEBAR
             MENUITEM SEPARATOR
             MENUITEM "載入工具列主題(&L)...",                IDM_VIEW_LOADTHEMETB
             MENUITEM "自訂工具列(&C)...",                    IDM_VIEW_CUSTOMIZETB

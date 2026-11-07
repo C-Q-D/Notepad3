@@ -145,6 +145,7 @@ BEGIN
         MENUITEM "デスクトップにショートカット(&K)",                  IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "ファイラで開く(&B)...\tCtrl+M",               IDM_FILE_BROWSE
+        MENUITEM "Open Fo&lder...",                      IDM_FILE_OPENFOLDER
         POPUP "お気に入り(&F)"
         BEGIN
             MENUITEM "お気に入りを開く(&O)...\tAlt+I",           IDM_FILE_OPENFAV
@@ -440,6 +441,7 @@ BEGIN
             MENUITEM "メニューバーを表示(&M)",                       IDM_VIEW_MENUBAR
             MENUITEM "ツールバーを表示(&T)",                        IDM_VIEW_TOOLBAR
             MENUITEM "ステータスバーを表示(&S)",                     IDM_VIEW_STATUSBAR
+            MENUITEM "Show Side&bar\tAlt+Shift+B",         IDM_VIEW_SIDEBAR
             MENUITEM SEPARATOR
             MENUITEM "独自アイコンを設定(&L)...",                   IDM_VIEW_LOADTHEMETB
             MENUITEM "ツールバーの編集(&C)...",                     IDM_VIEW_CUSTOMIZETB

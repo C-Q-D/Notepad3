@@ -145,6 +145,7 @@ BEGIN
         MENUITEM "डेस्कटॉप पर लिंक बनाएं (&K)",            IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "खोजें (&B)...\tCtrl+M",              IDM_FILE_BROWSE
+        MENUITEM "Open Fo&lder...",                    IDM_FILE_OPENFOLDER
         POPUP "पसंदीदा (&F)"
         BEGIN
             MENUITEM "पसंदीदा खोलें (&O)...\tAlt+I",    IDM_FILE_OPENFAV
@@ -440,6 +441,7 @@ BEGIN
             MENUITEM "मेनूपट्टी दिखाएं (&M)",                    IDM_VIEW_MENUBAR
             MENUITEM "औज़ारपट्टी दिखाएं (&T)",                  IDM_VIEW_TOOLBAR
             MENUITEM "अवस्था पट्टी दिखाएं (&S)",                 IDM_VIEW_STATUSBAR
+            MENUITEM "Show Side&bar\tAlt+Shift+B",               IDM_VIEW_SIDEBAR
             MENUITEM SEPARATOR
             MENUITEM "औज़ारपट्टी थीम लोड करें (&L)...",          IDM_VIEW_LOADTHEMETB
             MENUITEM "मनपसंद औज़ार पट्टी बनाएं (&C)...",         IDM_VIEW_CUSTOMIZETB

@@ -145,6 +145,7 @@ BEGIN
         MENUITEM "Σύνδεσμος στην επιφάνεια εργασίας",   IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "Εύ&ρεση...\tCtrl+M",              IDM_FILE_BROWSE
+        MENUITEM "Open Fo&lder...",                 IDM_FILE_OPENFOLDER
         POPUP "Αγαπη&μένα"
         BEGIN
             MENUITEM "Ά&νοιγμα αγαπημένων...\tAlt+I",          IDM_FILE_OPENFAV
@@ -440,6 +441,7 @@ BEGIN
             MENUITEM "Εμφάνιση γραμμής &μενού",            IDM_VIEW_MENUBAR
             MENUITEM "Εμφάνιση γραμμής &εργαλείων",        IDM_VIEW_TOOLBAR
             MENUITEM "Εμφάνιση γραμμής &κατάστασης",       IDM_VIEW_STATUSBAR
+            MENUITEM "Show Side&bar\tAlt+Shift+B",         IDM_VIEW_SIDEBAR
             MENUITEM SEPARATOR
             MENUITEM "&Θέμα γραμμής εργαλείων...",         IDM_VIEW_LOADTHEMETB
             MENUITEM "&Προσαρμογή γραμμής εργαλείων...",   IDM_VIEW_CUSTOMIZETB

@@ -145,6 +145,7 @@ BEGIN
         MENUITEM "&Masaüstünde kısayol oluştur",                      IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "Göz a&t...\tCtrl+M",                                IDM_FILE_BROWSE
+        MENUITEM "Open Fo&lder...",                                   IDM_FILE_OPENFOLDER
         POPUP "&Sık kullanılanlar"
         BEGIN
             MENUITEM "Sık kullanılanları &aç...\tAlt+I",              IDM_FILE_OPENFAV
@@ -440,6 +441,7 @@ BEGIN
             MENUITEM "&Menü çubuğu görüntülensin",                    IDM_VIEW_MENUBAR
             MENUITEM "&Araç çubuğu görüntülensin",                    IDM_VIEW_TOOLBAR
             MENUITEM "&Durum çubuğu görüntülensin",                   IDM_VIEW_STATUSBAR
+            MENUITEM "Show Side&bar\tAlt+Shift+B",                    IDM_VIEW_SIDEBAR
             MENUITEM SEPARATOR
             MENUITEM "Araç çubuğu teması &yükle...",                  IDM_VIEW_LOADTHEMETB
             MENUITEM "Ö&zelleştir...",                                IDM_VIEW_CUSTOMIZETB

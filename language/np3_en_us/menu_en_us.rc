@@ -145,6 +145,7 @@ BEGIN
         MENUITEM "Create Des&ktop Link",            IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "&Browse...\tCtrl+M",              IDM_FILE_BROWSE
+        MENUITEM "Open Fo&lder...",                 IDM_FILE_OPENFOLDER
         POPUP "&Favorites"
         BEGIN
             MENUITEM "&Open Favorites...\tAlt+I",     IDM_FILE_OPENFAV
@@ -440,6 +441,7 @@ BEGIN
             MENUITEM "Show &Menubar",                   IDM_VIEW_MENUBAR
             MENUITEM "Show &Toolbar",                   IDM_VIEW_TOOLBAR
             MENUITEM "Show &Statusbar",                 IDM_VIEW_STATUSBAR
+            MENUITEM "Show Side&bar\tAlt+Shift+B",      IDM_VIEW_SIDEBAR
             MENUITEM SEPARATOR
             MENUITEM "&Load Toolbar Theme...",          IDM_VIEW_LOADTHEMETB
             MENUITEM "&Customize Toolbar...",           IDM_VIEW_CUSTOMIZETB

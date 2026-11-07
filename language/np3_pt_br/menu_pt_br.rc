@@ -145,6 +145,7 @@ BEGIN
         MENUITEM "Criar Atalho na Área de &Trabalho",   IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "&Procurar...\tCtrl+M",                IDM_FILE_BROWSE
+        MENUITEM "Open Fo&lder...",                     IDM_FILE_OPENFOLDER
         POPUP "&Favoritos"
         BEGIN
             MENUITEM "&Abrir Favoritos...\tAlt+I",              IDM_FILE_OPENFAV
@@ -440,6 +441,7 @@ BEGIN
             MENUITEM "Mostrar &Menu",                               IDM_VIEW_MENUBAR
             MENUITEM "Mostrar &Barra de Ferramentas",               IDM_VIEW_TOOLBAR
             MENUITEM "Mostrar Barra de &Status",                    IDM_VIEW_STATUSBAR
+            MENUITEM "Show Side&bar\tAlt+Shift+B",                  IDM_VIEW_SIDEBAR
             MENUITEM SEPARATOR
             MENUITEM "&Carregar Barra de Ferramentas do Tema...",   IDM_VIEW_LOADTHEMETB
             MENUITEM "C&ustomizar Barra de Ferramentas...",         IDM_VIEW_CUSTOMIZETB

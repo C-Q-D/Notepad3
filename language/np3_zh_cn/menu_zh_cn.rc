@@ -145,6 +145,7 @@ BEGIN
         MENUITEM "创建桌面链接(&K)",                          IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "浏览(&B)...\tCtrl+M",                       IDM_FILE_BROWSE
+        MENUITEM "打开文件夹(&L)...",                            IDM_FILE_OPENFOLDER
         POPUP "收藏夹(&F)"
         BEGIN
             MENUITEM "打开收藏夹(&O)...\tAlt+I",              IDM_FILE_OPENFAV
@@ -440,6 +441,7 @@ BEGIN
             MENUITEM "显示菜单栏(&M)",                       IDM_VIEW_MENUBAR
             MENUITEM "显示工具栏(&T)",                       IDM_VIEW_TOOLBAR
             MENUITEM "显示状态栏(&S)",                       IDM_VIEW_STATUSBAR
+            MENUITEM "显示侧栏(&B)\tAlt+Shift+B",           IDM_VIEW_SIDEBAR
             MENUITEM SEPARATOR
             MENUITEM "加载工具栏主题(&L)...",                IDM_VIEW_LOADTHEMETB
             MENUITEM "自定义工具栏(&C)...",                  IDM_VIEW_CUSTOMIZETB

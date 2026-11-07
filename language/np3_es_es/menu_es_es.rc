@@ -145,6 +145,7 @@ BEGIN
         MENUITEM "Crear acceso directo en el escri&torio",  IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "&Mini explorador externo...\tCtrl+M",     IDM_FILE_BROWSE
+        MENUITEM "Open Fo&lder...",                         IDM_FILE_OPENFOLDER
         POPUP "Fa&voritos"
         BEGIN
             MENUITEM "Abrir favor&itos...\tAlt+I",          IDM_FILE_OPENFAV
@@ -440,6 +441,7 @@ BEGIN
             MENUITEM "Mostrar la barra de &menú",                       IDM_VIEW_MENUBAR
             MENUITEM "&Mostrar la barra de herramientas",               IDM_VIEW_TOOLBAR
             MENUITEM "Mostrar barra de &estado",                        IDM_VIEW_STATUSBAR
+            MENUITEM "Show Side&bar\tAlt+Shift+B",                      IDM_VIEW_SIDEBAR
             MENUITEM SEPARATOR
             MENUITEM "&Cargar un tema de herramientas...",              IDM_VIEW_LOADTHEMETB
             MENUITEM "&Personalizar la barra de herramientas...",       IDM_VIEW_CUSTOMIZETB

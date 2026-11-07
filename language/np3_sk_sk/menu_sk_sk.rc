@@ -145,6 +145,7 @@ BEGIN
         MENUITEM "Vytvoriť &zástupcu na Ploche",           IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "Pre&hľadávať...\tCtrl+M",                 IDM_FILE_BROWSE
+        MENUITEM "Open Fo&lder...",                         IDM_FILE_OPENFOLDER
         POPUP "O&bľúbené súbory"
         BEGIN
             MENUITEM "Otvor&iť Obľúbené...\tAlt+I",         IDM_FILE_OPENFAV
@@ -440,6 +441,7 @@ BEGIN
             MENUITEM "Zobraziť &textové menu",              IDM_VIEW_MENUBAR
             MENUITEM "Zobraziť pan&el nástrojov",           IDM_VIEW_TOOLBAR
             MENUITEM "Zobraziť &stavový riadok",            IDM_VIEW_STATUSBAR
+            MENUITEM "Show Side&bar\tAlt+Shift+B",          IDM_VIEW_SIDEBAR
             MENUITEM SEPARATOR
             MENUITEM "&Načítať motív panela nástrojov...",  IDM_VIEW_LOADTHEMETB
             MENUITEM "&Prispôsobiť panel nástrojov...",     IDM_VIEW_CUSTOMIZETB

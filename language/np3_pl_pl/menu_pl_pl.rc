@@ -145,6 +145,7 @@ BEGIN
         MENUITEM "Utwórz skrót na Pulpicie",             IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "&Przeglądaj...\tCtrl+M",               IDM_FILE_BROWSE
+        MENUITEM "Open Fo&lder...",                      IDM_FILE_OPENFOLDER
         POPUP "&Ulubione"
         BEGIN
             MENUITEM "&Otwórz Ulubione...\tAlt+I",       IDM_FILE_OPENFAV
@@ -440,6 +441,7 @@ BEGIN
             MENUITEM "Pokaż pasek menu",                            IDM_VIEW_MENUBAR
             MENUITEM "Pokaż pasek narzędzi",                        IDM_VIEW_TOOLBAR
             MENUITEM "Pokaż pasek stanu",                           IDM_VIEW_STATUSBAR
+            MENUITEM "Show Side&bar\tAlt+Shift+B",                  IDM_VIEW_SIDEBAR
             MENUITEM SEPARATOR
             MENUITEM "&Załaduj motyw paska narzędzi...",            IDM_VIEW_LOADTHEMETB
             MENUITEM "Dostosuj pasek narzędzi...",                  IDM_VIEW_CUSTOMIZETB

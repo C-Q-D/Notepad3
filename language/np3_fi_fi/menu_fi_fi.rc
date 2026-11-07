@@ -145,6 +145,7 @@ BEGIN
         MENUITEM "Luo työpöytälin&kki",             IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "&Selaa...\tCtrl+M",               IDM_FILE_BROWSE
+        MENUITEM "Open Fo&lder...",                 IDM_FILE_OPENFOLDER
         POPUP "&Suosikit"
         BEGIN
             MENUITEM "&Avaa suosikit...\tAlt+I",             IDM_FILE_OPENFAV
@@ -440,6 +441,7 @@ BEGIN
             MENUITEM "Näytä &valikkopalkki",                   IDM_VIEW_MENUBAR
             MENUITEM "Näytä &työkalurivi",                   IDM_VIEW_TOOLBAR
             MENUITEM "Näytä tila&palkki",                 IDM_VIEW_STATUSBAR
+            MENUITEM "Show Side&bar\tAlt+Shift+B",        IDM_VIEW_SIDEBAR
             MENUITEM SEPARATOR
             MENUITEM "&Lataa työkalupalkkiteema...",          IDM_VIEW_LOADTHEMETB
             MENUITEM "&Mukauta työkaluriviä...",           IDM_VIEW_CUSTOMIZETB

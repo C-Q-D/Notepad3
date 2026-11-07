@@ -145,6 +145,7 @@ BEGIN
         MENUITEM "Erzeuge &Desktop Link",                   IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "&Externer Dateibrowser...\tCtrl+M",       IDM_FILE_BROWSE
+        MENUITEM "Open Fo&lder...",                         IDM_FILE_OPENFOLDER
         POPUP "&Favoriten"
         BEGIN
             MENUITEM "&Öffne Favoriten...\tAlt+I",          IDM_FILE_OPENFAV
@@ -440,6 +441,7 @@ BEGIN
             MENUITEM "Zeige &Menüleiste",                       IDM_VIEW_MENUBAR
             MENUITEM "Zeige &Werkzeugleiste",                   IDM_VIEW_TOOLBAR
             MENUITEM "Zeige &Statusleiste",                     IDM_VIEW_STATUSBAR
+            MENUITEM "Show Side&bar\tAlt+Shift+B",              IDM_VIEW_SIDEBAR
             MENUITEM SEPARATOR
             MENUITEM "&Lade andere Werkzeugleiste...",          IDM_VIEW_LOADTHEMETB
             MENUITEM "Werkzeugleiste &anpassen...",             IDM_VIEW_CUSTOMIZETB

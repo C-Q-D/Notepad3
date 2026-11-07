@@ -145,6 +145,7 @@ BEGIN
         MENUITEM "Skapa skrivbordsgenväg",                            IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "Bläddra...\tCtrl+M",                              IDM_FILE_BROWSE
+        MENUITEM "Open Fo&lder...",                                 IDM_FILE_OPENFOLDER
         POPUP "Favoriter"
         BEGIN
             MENUITEM "Öppna favoriter...\tAlt+I",                   IDM_FILE_OPENFAV
@@ -440,6 +441,7 @@ BEGIN
             MENUITEM "Visa menyfält",                               IDM_VIEW_MENUBAR
             MENUITEM "Visa verktygsfält",                           IDM_VIEW_TOOLBAR
             MENUITEM "Visa statusfält",                             IDM_VIEW_STATUSBAR
+            MENUITEM "Show Side&bar\tAlt+Shift+B",                  IDM_VIEW_SIDEBAR
             MENUITEM SEPARATOR
             MENUITEM "Ladda tema för verktygsfält...",              IDM_VIEW_LOADTHEMETB
             MENUITEM "Anpassa verktygsfält...",                     IDM_VIEW_CUSTOMIZETB

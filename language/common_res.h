@@ -207,6 +207,7 @@
 #define IDS_MUI_MRU_COPY_FULLPATH       14028
 #define IDS_MUI_MRU_COPY_DIRPATH        14029
 #define IDS_MUI_MRU_COPY_FILENAME       14030
+#define IDS_MUI_OPENFOLDER_TITLE        14031
 
 #define IDS_MUI_ASK_SAVE                15000
 #define IDS_MUI_ASK_REVERT              15001
@@ -645,6 +646,7 @@
 #define IDM_FILE_EXIT                   40025
 #define IDM_FILE_PRESERVE_FILEMODTIME   40026
 #define IDM_FILE_LOCK_SHARE_READ        40027
+#define IDM_FILE_OPENFOLDER             40028
 
 #define IDM_ENCODING_ANSI               40100
 #define IDM_ENCODING_UNICODE            40101
@@ -830,6 +832,7 @@
 #define IDM_VIEW_CHGHIST_TOGGLE_MARGIN  41063
 #define IDM_VIEW_CHGHIST_CLEAR_UNDOREDO 41064
 #define IDM_VIEW_NONPRINTINGCHARS       41065
+#define IDM_VIEW_SIDEBAR                41066
 
 // keep Scintilla(SC) order
 #define IDM_SET_RENDER_TECH_GDI         42000   // SC_TECHNOLOGY_DEFAULT(0)

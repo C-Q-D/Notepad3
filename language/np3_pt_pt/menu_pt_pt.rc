@@ -145,6 +145,7 @@ BEGIN
         MENUITEM "Criar ligação ao ambiente &de trabalho", IDM_FILE_CREATELINK
         MENUITEM SEPARATOR
         MENUITEM "&Procurar...\tCtrl+M",                   IDM_FILE_BROWSE
+        MENUITEM "Open Fo&lder...",                        IDM_FILE_OPENFOLDER
         POPUP "&Favoritos"
         BEGIN
             MENUITEM "Abrir Fav&oritos...\tAlt+I",             IDM_FILE_OPENFAV
@@ -440,6 +441,7 @@ BEGIN
             MENUITEM "Mostrar barra de &menu",                         IDM_VIEW_MENUBAR
             MENUITEM "Mostrar barra de ferramen&tas",                  IDM_VIEW_TOOLBAR
             MENUITEM "Mostrar barra de e&stado",                       IDM_VIEW_STATUSBAR
+            MENUITEM "Show Side&bar\tAlt+Shift+B",                     IDM_VIEW_SIDEBAR
             MENUITEM SEPARATOR
             MENUITEM "Carregar tema da barra de ferramentas...",       IDM_VIEW_LOADTHEMETB
             MENUITEM "&Personalizar barra de ferramentas...",          IDM_VIEW_CUSTOMIZETB
