@@ -23,6 +23,7 @@ static size_t s_iconCount = 0;
 static int s_folderIcon = 0;
 static POINT s_clickPoint;
 static bool s_clickPointValid = false;
+static bool s_syncAfterClick = false;
 
 // Keep the client coordinates of the mouse message that produces NM_CLICK.
 // Using its lParam also works when the window receives directed input messages.
@@ -36,6 +37,11 @@ static LRESULT CALLBACK _Sidebar_TreeProc(HWND hwnd, UINT message, WPARAM wParam
         s_clickPointValid = true;
         LRESULT const result = DefSubclassProc(hwnd, message, wParam, lParam);
         s_clickPointValid = false;
+        if (s_syncAfterClick) {
+            // Native click selection happens after NM_CLICK; restore only after it finishes.
+            s_syncAfterClick = false;
+            Sidebar_SyncToFile(Paths.CurrentFile);
+        }
         return result;
     }
     if (message == WM_NCDESTROY) {
@@ -49,7 +55,7 @@ static LRESULT CALLBACK _Sidebar_TreeProc(HWND hwnd, UINT message, WPARAM wParam
 // ancestors so large trees do not retain a second path string for every entry.
 enum { SIDEBAR_FILE = 0, SIDEBAR_UNLOADED = 1, SIDEBAR_LOADED = 2 };
 
-// Read an existing item's name and kind into caller-owned storage (256 WCHARs).
+// Read an existing item's name and kind into MAX_PATH_EXPLICIT WCHARs of storage.
 // False means that the item no longer exists; no returned buffer is borrowed.
 static bool _Sidebar_GetItem(HTREEITEM item, LPWSTR name, LPARAM* kind)
 {
@@ -142,6 +148,19 @@ static void _Sidebar_ClearChildren(HTREEITEM parent)
     }
 }
 
+// Programmatic collapse may omit the native notifications after the first expand.
+// Reset both the lazy-load marker and children for every collapse entry point.
+static void _Sidebar_CollapseDirectory(HTREEITEM item)
+{
+    TVITEMW state = { 0 };
+    state.mask = TVIF_PARAM | TVIF_CHILDREN;
+    state.hItem = item;
+    state.lParam = SIDEBAR_UNLOADED;
+    state.cChildren = 1;
+    TreeView_SetItem(s_tree, &state);
+    TreeView_Expand(s_tree, item, TVE_COLLAPSE | TVE_COLLAPSERESET);
+}
+
 // Resize only while this splitter owns mouse capture. Coordinates are converted
 // to the parent so dragging remains stable when the child moves under the mouse.
 static LRESULT CALLBACK _Sidebar_SplitterProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR id, DWORD_PTR data)
@@ -149,6 +168,18 @@ static LRESULT CALLBACK _Sidebar_SplitterProc(HWND hwnd, UINT message, WPARAM wP
     UNREFERENCED_PARAMETER(id);
     UNREFERENCED_PARAMETER(data);
     switch (message) {
+    case WM_ERASEBKGND:
+        return TRUE;
+    case WM_PAINT: {
+        // Static controls do not inherit the tree's dark background automatically.
+        // Reuse the application's theme brush rather than introducing a palette.
+        PAINTSTRUCT paint;
+        HDC const dc = BeginPaint(hwnd, &paint);
+        HBRUSH const brush = UseDarkMode() && Globals.hbrDarkModeBkgBrush ? Globals.hbrDarkModeBkgBrush : GetSysColorBrush(COLOR_BTNFACE);
+        FillRect(dc, &paint.rcPaint, brush);
+        EndPaint(hwnd, &paint);
+        return 0;
+    }
     case WM_SETCURSOR:
         SetCursor(LoadCursor(NULL, IDC_SIZEWE));
         return TRUE;
@@ -156,14 +187,15 @@ static LRESULT CALLBACK _Sidebar_SplitterProc(HWND hwnd, UINT message, WPARAM wP
         SetCapture(hwnd);
         return 0;
     case WM_MOUSEMOVE:
-        if (GetCapture() == hwnd) {
+        // Capture can outlive the button release; ignore moves without a held button.
+        if (GetCapture() == hwnd && (wParam & MK_LBUTTON)) {
             POINT point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             HWND const parent = GetParent(hwnd);
             MapWindowPoints(hwnd, parent, &point, 1);
             RECT client;
             GetClientRect(parent, &client);
             UINT const dpi = Scintilla_GetWindowDPI(parent);
-            int const pixels = _Sidebar_ClampWidth(MulDiv(point.x, 96, dpi), client.right, dpi);
+            int const pixels = _Sidebar_ClampWidth(MulDiv(point.x, 96, dpi), client.right - MulDiv(4, dpi, 96), dpi);
             Settings.SidebarWidth = MulDiv(pixels, 96, dpi);
             UpdateUI(parent);
         }
@@ -180,6 +212,7 @@ static LRESULT CALLBACK _Sidebar_SplitterProc(HWND hwnd, UINT message, WPARAM wP
     return DefSubclassProc(hwnd, message, wParam, lParam);
 }
 
+// Save policy for replacing the current document; SW_SAME_FILE must not reload it.
 typedef enum { SW_SAME_FILE, SW_SAVE_SILENT, SW_ASK_UNTITLED, SW_NO_SAVE } SwitchAction;
 
 // Decide whether switching may proceed or must first save. Inputs describe the
@@ -428,7 +461,7 @@ void Sidebar_Refresh(void)
     }
     TreeView_SelectItem(s_tree, Path_IsNotEmpty(selected) ? _Sidebar_FindPath(selected, false) : NULL);
     if (!rootExpanded) {
-        TreeView_Expand(s_tree, TreeView_GetRoot(s_tree), TVE_COLLAPSE);
+        _Sidebar_CollapseDirectory(TreeView_GetRoot(s_tree));
     }
     Path_Release(selected);
 }
@@ -492,6 +525,7 @@ LRESULT Sidebar_OnNotify(const NMHDR* notification)
             HPATHL path = _Sidebar_ItemPath(item);
             _Sidebar_OpenFile(path);
             Path_Release(path);
+            s_syncAfterClick = true;
         }
     } else if (notification->code == TVN_ITEMEXPANDINGW) {
         NMTREEVIEWW const* event = (NMTREEVIEWW const*)notification;
@@ -501,13 +535,7 @@ LRESULT Sidebar_OnNotify(const NMHDR* notification)
     } else if (notification->code == TVN_ITEMEXPANDEDW) {
         NMTREEVIEWW const* event = (NMTREEVIEWW const*)notification;
         if (event->action == TVE_COLLAPSE) {
-            TVITEMW state = { 0 };
-            state.mask = TVIF_PARAM | TVIF_CHILDREN;
-            state.hItem = event->itemNew.hItem;
-            state.lParam = SIDEBAR_UNLOADED;
-            state.cChildren = 1;
-            TreeView_SetItem(s_tree, &state);
-            TreeView_Expand(s_tree, state.hItem, TVE_COLLAPSE | TVE_COLLAPSERESET);
+            _Sidebar_CollapseDirectory(event->itemNew.hItem);
         }
     }
     return 0;
@@ -536,6 +564,48 @@ bool Sidebar_Create(HWND parent)
     return true;
 }
 
+bool Sidebar_PreTranslateMessage(MSG* message)
+{
+    if (!s_tree || message->hwnd != s_tree || message->message < WM_KEYFIRST ||
+        message->message > WM_KEYLAST || GetKeyState(VK_CONTROL) < 0 || GetKeyState(VK_MENU) < 0) {
+        return false;
+    }
+    if (message->message == WM_KEYDOWN) {
+        switch (message->wParam) {
+        case VK_RETURN: {
+            HTREEITEM const item = TreeView_GetSelection(s_tree);
+            WCHAR name[MAX_PATH_EXPLICIT];
+            LPARAM kind;
+            if (item && _Sidebar_GetItem(item, name, &kind)) {
+                if (kind == SIDEBAR_FILE) {
+                    HPATHL path = _Sidebar_ItemPath(item);
+                    _Sidebar_OpenFile(path);
+                    Path_Release(path);
+                } else if (TreeView_GetItemState(s_tree, item, TVIS_EXPANDED) & TVIS_EXPANDED) {
+                    _Sidebar_CollapseDirectory(item);
+                } else if (kind != SIDEBAR_UNLOADED || _Sidebar_LoadChildren(item)) {
+                    // Ensure loading even when TreeView omits repeat notifications.
+                    TreeView_Expand(s_tree, item, TVE_EXPAND);
+                }
+            }
+            return true;
+        }
+        case VK_F5:
+            Sidebar_Refresh();
+            return true;
+        case VK_ESCAPE:
+        case VK_TAB:
+            SetFocus(Globals.hwndEdit);
+            return true;
+        }
+    }
+    // Let TreeView implement arrows, incremental search and other native keys.
+    // They must bypass the editor's unmodified accelerators as well.
+    TranslateMessage(message);
+    DispatchMessage(message);
+    return true;
+}
+
 void Sidebar_Show(bool visible)
 {
     if (!s_tree) {
@@ -560,8 +630,9 @@ void Sidebar_Layout(RECT* available)
         return;
     }
     UINT const dpi = Scintilla_GetWindowDPI(GetParent(s_tree));
-    int const width = _Sidebar_ClampWidth(Settings.SidebarWidth, available->right - available->left, dpi);
     int const split = MulDiv(4, dpi, 96);
+    // The editor reserve must exclude the splitter as well as the tree itself.
+    int const width = _Sidebar_ClampWidth(Settings.SidebarWidth, available->right - available->left - split, dpi);
     int const height = max_i(0, available->bottom - available->top);
     SetWindowPos(s_tree, NULL, available->left, available->top, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
     SetWindowPos(s_splitter, NULL, available->left + width, available->top, split, height, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -577,7 +648,8 @@ void Sidebar_OnThemeChanged(void)
     InitTreeView(s_tree);
     s_iconCount = 0;
     SHFILEINFOW info = { 0 };
-    HIMAGELIST const images = (HIMAGELIST)SHGetFileInfoW(L"C:\\", FILE_ATTRIBUTE_DIRECTORY, &info, sizeof(info),
+    // A synthetic directory name yields the folder icon; a drive root yields a drive icon.
+    HIMAGELIST const images = (HIMAGELIST)SHGetFileInfoW(L"folder", FILE_ATTRIBUTE_DIRECTORY, &info, sizeof(info),
                                                      SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
     TreeView_SetImageList(s_tree, images, TVSIL_NORMAL);
     s_folderIcon = info.iIcon;

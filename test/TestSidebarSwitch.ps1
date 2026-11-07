@@ -2,7 +2,8 @@
 # Expected values come from the sidebar contract; no test-only production API is used.
 param([string]$SidebarSource = (Join-Path $PSScriptRoot '..\src\Sidebar.c'))
 $ErrorActionPreference = 'Stop'
-$temp = Join-Path $env:TEMP ('np3-sidebar-L1-switch-' + [guid]::NewGuid())
+$tempRoot = [IO.Path]::GetFullPath((Join-Path $env:TEMP 'np3-sidebar\L1-tmp'))
+$temp = Join-Path $tempRoot ('switch-' + [guid]::NewGuid())
 [void](New-Item -ItemType Directory -Path $temp)
 try {
     $source = Get-Content -LiteralPath $SidebarSource -Raw
@@ -20,10 +21,12 @@ typedef enum { SW_SAME_FILE, SW_SAVE_SILENT, SW_ASK_UNTITLED, SW_NO_SAVE } Switc
 '@ + "`n" + ($parts -join "`n") + @'
 
 static int failures = 0;
+// Record an independent contract assertion; main returns failure if any check fails.
 static void check(const char* name, bool pass) {
     printf("%s: %s\n", pass ? "PASS" : "FAIL", name);
     if (!pass) ++failures;
 }
+// Exercise decision combinations, ordering and DPI boundaries without a UI fixture.
 int main(void) {
     check("same file keeps current document", _Sidebar_DecideSwitch(true, true, true) == SW_SAME_FILE);
     check("clean named document needs no save", _Sidebar_DecideSwitch(false, false, true) == SW_NO_SAVE);
@@ -59,5 +62,8 @@ int main(void) {
     & $exe
     if ($LASTEXITCODE -ne 0) { throw 'Sidebar policy assertions failed' }
 } finally {
+    # Check the absolute target before recursive cleanup; never remove the shared root.
+    if ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($temp)) -ne $tempRoot -or
+        [IO.Path]::GetFileName($temp) -notlike 'switch-*') { throw 'Unsafe sidebar harness cleanup path' }
     Remove-Item -LiteralPath $temp -Recurse -Force
 }

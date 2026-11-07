@@ -2,7 +2,8 @@
 #pragma once
 #include "TypeDefs.h"
 
-// Create hidden child controls for parent. Return false if either control fails.
+// Create child controls for parent using the configured visibility; root restoration
+// follows startup FileLoad. Return false if either control or subclass fails.
 bool Sidebar_Create(HWND parent);
 // Show or hide both controls; hiding returns focus to the editor when needed.
 void Sidebar_Show(bool visible);
@@ -21,3 +22,6 @@ void Sidebar_SyncToFile(const HPATHL file);
 LRESULT Sidebar_OnNotify(const NMHDR* notification);
 // Re-enumerate the root and restore expanded paths and selection where they exist.
 void Sidebar_Refresh(void);
+// Consume unmodified tree keyboard messages before main accelerators can turn
+// Enter into an editor newline or F5 into Revert. Ctrl/Alt combinations pass on.
+bool Sidebar_PreTranslateMessage(MSG* message);

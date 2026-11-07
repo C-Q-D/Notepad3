@@ -1588,6 +1588,9 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
                 continue;
             }
         }
+        if (Sidebar_PreTranslateMessage(&msg)) {
+            continue;
+        }
         if (!TranslateAccelerator(hwnd, hAccMain, &msg)) {
             TranslateMessage(&msg);
             DispatchMessage(&msg);

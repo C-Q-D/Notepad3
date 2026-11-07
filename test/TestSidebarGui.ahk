@@ -4,6 +4,7 @@
 #SingleInstance Off
 global testDir := A_Args[1], through := A_Args[2], testPid := 0, main := 0
 global scenario := A_Args[3]
+global screenshotDirectory := A_Args[4], themeName := A_Args[5]
 global logFile := testDir '\gui.log'
 exitCode := 0
 try {
@@ -19,6 +20,15 @@ try {
     dpi := DllCall('GetDpiForWindow', 'ptr', main, 'uint')
     ControlGetPos(&tx, &ty, &tw, &th, tree)
     Check(Abs(tw - 300 * dpi / 96) <= 4, 'A width is 300 logical pixels (actual ' tw ', DPI ' dpi ')')
+    DragWidth(tree, 50)
+    ControlGetPos(, , &tw, , tree)
+    Check(Abs(tw - 100 * dpi / 96) <= 4, 'A dragging enforces minimum width')
+    DragWidth(tree, 4000)
+    ControlGetPos(, , &editorWidth, , editor)
+    Check(editorWidth >= 200 * dpi / 96 - 4, 'A dragging reserves editor width')
+    DragWidth(tree, 300)
+    ControlGetPos(, , &tw, , tree)
+    Check(Abs(tw - 300 * dpi / 96) <= 4, 'A dragging restores requested width')
     PostMessage(0x111, 41066, 0, , main)
     WaitUntil(() => !DllCall('IsWindowVisible', 'ptr', tree), 'A hide command hides tree')
     ControlGetPos(&ex, , , , editor)
@@ -38,9 +48,18 @@ try {
         last := SendMessage(0x110A, 1, bItem, tree)
         Check(TreeText(tree, last) = 'b10.txt' && SendMessage(0x110A, 1, last, tree) = 0, 'B complete first level order')
         Check(SendMessage(0x110A, 9, 0, tree) = aItem, 'B command line file selected')
-        SendMessage(0x1102, 2, child, tree)
+        ClickTree(tree, child, true)
+        WaitUntil(() => SendMessage(0x110A, 4, child, tree) != 0, 'B expand button loads sub')
         inner := SendMessage(0x110A, 4, child, tree)
         Check(TreeText(tree, inner) = 'inner.txt', 'B expanding sub loads inner.txt')
+        ClickTree(tree, child, true)
+        WaitUntil(() => SendMessage(0x110A, 4, child, tree) = 0, 'B collapsing sub discards loaded children')
+        ClickTree(tree, child, true)
+        WaitUntil(() => TreeText(tree, SendMessage(0x110A, 4, child, tree)) = 'inner.txt', 'B re-expanding sub reloads contents')
+    }
+    if screenshotDirectory != '' {
+        CaptureWindow(main, screenshotDirectory '\sidebar-' StrLower(themeName) '.png')
+        Check(true, 'window screenshot saved for ' themeName ' theme')
     }
     if Ord(through) >= Ord('C') && (scenario = 'All' || scenario = 'C') {
         TypeText(editor, 'XYZ')
@@ -70,6 +89,7 @@ try {
         Check(WinWaitClose(dialog, , 2), 'D Cancel closes save question')
         Check(WinGetTitle(main) = beforeTitle, 'D Cancel retains untitled title')
         Check(EditorText(editor) = beforeText, 'D Cancel retains editor text')
+        Check(SendMessage(0x110A, 9, 0, tree) = 0, 'D Cancel clears tree selection for untitled document')
     }
     if Ord(through) >= Ord('E') && (scenario = 'All' || scenario = 'E') {
         ; Create the read-only fixture only after B's exact four-entry assertion.
@@ -95,6 +115,49 @@ try {
         PostMessage(0x111, 7, 0, , dialog)
         Check(WinWaitClose(dialog, , 2), 'E No closes read-only prompt')
         Check(InStr(WinGetTitle(main), 'ro.txt'), 'E No keeps ro.txt open')
+        Check(TreeText(tree, SendMessage(0x110A, 9, 0, tree)) = 'ro.txt', 'E No restores real current-file selection')
+    }
+    if Ord(through) >= Ord('F') && (scenario = 'All' || scenario = 'F') {
+        SendMessage(2014, 0, 0, editor)
+        ClickTree(tree, TreeFind(tree, 'a.txt'))
+        WaitUntil(() => InStr(WinGetTitle(main), 'a.txt') != 0, 'F clean starting file opens')
+        bItem := TreeFind(tree, 'b2.txt')
+        SendMessage(0x110B, 9, bItem, tree)
+        ControlFocus(tree)
+        TreeKey(tree, 0x0D)
+        WaitUntil(() => InStr(WinGetTitle(main), 'b2.txt') != 0, 'F Enter opens selected b2.txt')
+        Check(SendMessage(2159, 0, 0, editor) = 0, 'F Enter does not modify document')
+        WaitUntil(() => !InStr(WinGetTitle(main), '*'), 'F Enter title has no modified marker')
+        Check(SendMessage(2154, 0, 0, editor) = 2, 'F Enter keeps two fixture lines')
+        TypeText(editor, 'keep-F5-change')
+        WaitUntil(() => SendMessage(2159, 0, 0, editor) != 0, 'F edit before F5 is present')
+        beforeText := EditorText(editor)
+        subItem := TreeFind(tree, 'sub')
+        SendMessage(0x1102, 2, subItem, tree)
+        FileAppend('refresh fixture', testDir '\fixture\refresh.txt', 'UTF-8')
+        ControlFocus(tree)
+        TreeKey(tree, 0x74)
+        WaitUntil(() => TreeFind(tree, 'refresh.txt') != 0, 'F F5 re-enumerates tree')
+        CheckNoDialog('F F5 does not invoke file revert prompt')
+        Check(true, 'F F5 does not invoke file revert prompt')
+        Check(EditorText(editor) = beforeText, 'F F5 preserves unsaved editor text')
+        Check(TreeFind(tree, 'a.txt') != 0 && TreeFind(tree, 'b2.txt') != 0 && TreeFind(tree, 'b10.txt') != 0, 'F F5 retains original tree entries')
+        Check(TreeText(tree, SendMessage(0x110A, 9, 0, tree)) = 'b2.txt', 'F F5 restores selection')
+        subItem := TreeFind(tree, 'sub')
+        Check((SendMessage(0x1127, subItem, 0x20, tree) & 0x20) != 0 && TreeText(tree, SendMessage(0x110A, 4, subItem, tree)) = 'inner.txt', 'F F5 restores expanded directory')
+        SendMessage(0x110B, 9, subItem, tree)
+        ControlFocus(tree)
+        TreeKey(tree, 0x0D)
+        WaitUntil(() => SendMessage(0x110A, 4, subItem, tree) = 0, 'F Enter collapses directory and discards children')
+        TreeKey(tree, 0x0D)
+        WaitUntil(() => TreeText(tree, SendMessage(0x110A, 4, subItem, tree)) = 'inner.txt', 'F Enter re-expands and reloads directory')
+        Check(EditorText(editor) = beforeText, 'F directory Enter leaves editor text unchanged')
+        ControlFocus(tree)
+        TreeKey(tree, 0x1B)
+        WaitUntil(() => ControlGetFocus(main) = editor, 'F Esc returns focus to editor')
+        ControlFocus(tree)
+        TreeKey(tree, 0x09)
+        WaitUntil(() => ControlGetFocus(main) = editor, 'F Tab returns focus to editor')
     }
     ; Clear the dirty flag only after all assertions, so normal close tests settings.
     SendMessage(2014, 0, 0, editor)
@@ -125,11 +188,72 @@ try {
 }
 ExitApp(exitCode)
 
-; Post character messages to the specified editor without touching desktop input.
+; Exercise the actual splitter's capture/drag path with client-coordinate messages.
+; logicalWidth is the desired left-pane width in 96-DPI logical pixels.
+DragWidth(tree, logicalWidth) {
+    parent := DllCall('GetParent', 'ptr', tree, 'ptr')
+    split := DllCall('GetDlgItem', 'ptr', parent, 'int', 0xFB0A, 'ptr')
+    dpi := DllCall('GetDpiForWindow', 'ptr', parent, 'uint')
+    ControlGetPos(&left, , , , split)
+    point := (Round(logicalWidth * dpi / 96) - left) & 0xffff
+    SendMessage(0x201, 1, 0, split)
+    SendMessage(0x200, 1, point, split)
+    SendMessage(0x202, 0, 0, split)
+}
+
+; Capture only the test window with PrintWindow and encode its bitmap as PNG.
+; All GDI/GDI+ handles are released even when capture or encoding fails.
+CaptureWindow(window, path) {
+    WinGetPos(, , &width, &height, window)
+    screen := DllCall('GetDC', 'ptr', window, 'ptr')
+    canvas := DllCall('CreateCompatibleDC', 'ptr', screen, 'ptr')
+    bitmap := DllCall('CreateCompatibleBitmap', 'ptr', screen, 'int', width, 'int', height, 'ptr')
+    previous := DllCall('SelectObject', 'ptr', canvas, 'ptr', bitmap, 'ptr')
+    gdipBitmap := 0, token := 0
+    library := DllCall('LoadLibraryW', 'str', 'gdiplus.dll', 'ptr')
+    try {
+        if !screen || !canvas || !bitmap || !DllCall('PrintWindow', 'ptr', window, 'ptr', canvas, 'uint', 2)
+            throw Error('PrintWindow capture failed')
+        startup := Buffer(24, 0)
+        NumPut('uint', 1, startup)
+        if DllCall('gdiplus\GdiplusStartup', 'uptr*', &token, 'ptr', startup, 'ptr', 0)
+            throw Error('GDI+ startup failed')
+        if DllCall('gdiplus\GdipCreateBitmapFromHBITMAP', 'ptr', bitmap, 'ptr', 0, 'ptr*', &gdipBitmap)
+            throw Error('GDI+ bitmap conversion failed')
+        encoder := Buffer(16, 0)
+        DllCall('ole32\CLSIDFromString', 'str', '{557CF406-1A04-11D3-9A73-0000F81EF32E}', 'ptr', encoder)
+        if DllCall('gdiplus\GdipSaveImageToFile', 'ptr', gdipBitmap, 'wstr', path, 'ptr', encoder, 'ptr', 0)
+            throw Error('PNG encoding failed')
+    } finally {
+        if gdipBitmap
+            DllCall('gdiplus\GdipDisposeImage', 'ptr', gdipBitmap)
+        if token
+            DllCall('gdiplus\GdiplusShutdown', 'uptr', token)
+        if previous
+            DllCall('SelectObject', 'ptr', canvas, 'ptr', previous)
+        if bitmap
+            DllCall('DeleteObject', 'ptr', bitmap)
+        if canvas
+            DllCall('DeleteDC', 'ptr', canvas)
+        if screen
+            DllCall('ReleaseDC', 'ptr', window, 'ptr', screen)
+        if library
+            DllCall('FreeLibrary', 'ptr', library)
+    }
+}
+
+; Send key transitions only to this tree; accelerator handling is exercised normally.
+TreeKey(tree, virtualKey) {
+    PostMessage(0x100, virtualKey, 0, tree)
+    PostMessage(0x101, virtualKey, 0, tree)
+}
+
+; Send character messages synchronously so snapshots include the full test input.
+; The specified editor receives them without any global keyboard input.
 TypeText(editor, text) {
     ControlFocus(editor)
     Loop Parse text
-        PostMessage(0x102, Ord(A_LoopField), 0, editor)
+        SendMessage(0x102, Ord(A_LoopField), 0, editor)
 }
 
 ; Reject any modal dialog owned by our process during the silent-save interval.
@@ -153,13 +277,16 @@ TreeFind(tree, name) {
 
 ; Click the real item's text rectangle using client-coordinate mouse messages.
 ; The pointer stays on the user's desktop position throughout this operation.
-ClickTree(tree, item) {
+; expandButton targets the hit-tested directory toggle instead of its label.
+ClickTree(tree, item, expandButton := false) {
     global testPid
     Check(item != 0, 'target tree item exists')
     SendMessage(0x1114, 0, item, tree)
     process := DllCall('OpenProcess', 'uint', 0x438, 'int', false, 'uint', testPid, 'ptr')
     memory := DllCall('VirtualAllocEx', 'ptr', process, 'ptr', 0, 'uptr', 64, 'uint', 0x3000, 'uint', 4, 'ptr')
     try {
+        if !process || !memory
+            throw Error('Cannot allocate remote tree hit-test buffer')
         data := Buffer(64, 0)
         NumPut('ptr', item, data)
         DllCall('WriteProcessMemory', 'ptr', process, 'ptr', memory, 'ptr', data, 'uptr', 64, 'ptr', 0)
@@ -167,6 +294,21 @@ ClickTree(tree, item) {
         DllCall('ReadProcessMemory', 'ptr', process, 'ptr', memory, 'ptr', data, 'uptr', 64, 'ptr', 0)
         x := NumGet(data, 0, 'int') + 4
         y := (NumGet(data, 4, 'int') + NumGet(data, 12, 'int')) // 2
+        if expandButton {
+            found := false
+            Loop x + 1 {
+                x -= 1
+                NumPut('int', x, 'int', y, data)
+                DllCall('WriteProcessMemory', 'ptr', process, 'ptr', memory, 'ptr', data, 'uptr', 64, 'ptr', 0)
+                SendMessage(0x1111, 0, memory, tree)
+                DllCall('ReadProcessMemory', 'ptr', process, 'ptr', memory, 'ptr', data, 'uptr', 64, 'ptr', 0)
+                if (NumGet(data, 8, 'uint') & 0x10) && NumGet(data, 16, 'ptr') = item {
+                    found := true
+                    break
+                }
+            }
+            Check(found, 'target expansion button hit tested')
+        }
         point := (y << 16) | (x & 0xffff)
         PostMessage(0x201, 1, point, tree)
         PostMessage(0x202, 0, point, tree)
@@ -199,7 +341,8 @@ EditorText(editor) {
     }
 }
 
-; Read a real remote TVITEMW. Native common controls require target-process buffers.
+; Read a real remote TVITEMW. Return empty for a node deleted during refresh;
+; polling callers retry against the new root. Common controls need remote buffers.
 TreeText(tree, item) {
     global testPid
     if !item
@@ -216,7 +359,7 @@ TreeText(tree, item) {
         NumPut('int', 256, data, 32)
         DllCall('WriteProcessMemory', 'ptr', process, 'ptr', memory, 'ptr', data, 'uptr', 4096, 'ptr', 0)
         if !SendMessage(0x113E, 0, memory, tree)
-            throw Error('TVM_GETITEMW failed')
+            return ''
         DllCall('ReadProcessMemory', 'ptr', process, 'ptr', memory, 'ptr', data, 'uptr', 4096, 'ptr', 0)
         return StrGet(data.Ptr + 128, 'UTF-16')
     } finally {
