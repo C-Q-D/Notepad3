@@ -21,6 +21,29 @@ typedef struct SidebarIcon {
 static SidebarIcon s_icons[256];
 static size_t s_iconCount = 0;
 static int s_folderIcon = 0;
+static POINT s_clickPoint;
+static bool s_clickPointValid = false;
+
+// Keep the client coordinates of the mouse message that produces NM_CLICK.
+// Using its lParam also works when the window receives directed input messages.
+static LRESULT CALLBACK _Sidebar_TreeProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR id, DWORD_PTR data)
+{
+    UNREFERENCED_PARAMETER(id);
+    UNREFERENCED_PARAMETER(data);
+    if (message == WM_LBUTTONDOWN || message == WM_LBUTTONUP) {
+        s_clickPoint.x = GET_X_LPARAM(lParam);
+        s_clickPoint.y = GET_Y_LPARAM(lParam);
+        s_clickPointValid = true;
+        LRESULT const result = DefSubclassProc(hwnd, message, wParam, lParam);
+        s_clickPointValid = false;
+        return result;
+    }
+    if (message == WM_NCDESTROY) {
+        RemoveWindowSubclass(hwnd, _Sidebar_TreeProc, 0);
+        s_tree = NULL;
+    }
+    return DefSubclassProc(hwnd, message, wParam, lParam);
+}
 
 // lParam encodes only node kind/loading state. Full paths are reconstructed from
 // ancestors so large trees do not retain a second path string for every entry.
@@ -410,12 +433,67 @@ void Sidebar_Refresh(void)
     Path_Release(selected);
 }
 
+// Save before replacing the document. False means cancelled/failed/no load; all
+// paths restore selection to the real document. Calls are guarded across dialogs.
+static bool _Sidebar_OpenFile(const HPATHL target)
+{
+    bool loaded = false;
+    SET_FCT_GUARD(false)
+    bool const same = Path_IsNotEmpty(Paths.CurrentFile) &&
+                      Path_StrgComparePath(target, Paths.CurrentFile, Paths.WorkingDirectory, true) == 0;
+    switch (_Sidebar_DecideSwitch(same, IsDocumentSaveNeeded(), Path_IsNotEmpty(Paths.CurrentFile))) {
+    case SW_SAME_FILE:
+        goto sync;
+    case SW_SAVE_SILENT:
+        if (!AutoSaveDoWork(FSF_None)) {
+            goto sync;
+        }
+        break;
+    case SW_ASK_UNTITLED:
+        if (!FileSave(FSF_Ask)) {
+            goto sync;
+        }
+        break;
+    case SW_NO_SAVE:
+        break;
+    }
+    {
+        FileLoadFlags const flags = FLF_DontSave |
+                                    (Settings.SkipUnicodeDetection ? FLF_SkipUnicodeDetect : 0) |
+                                    (Settings.SkipANSICodePageDetection ? FLF_SkipANSICPDetection : 0);
+        loaded = FileLoad(target, flags, 0, 0);
+    }
+sync:
+    Sidebar_SyncToFile(Paths.CurrentFile);
+    RESET_FCT_GUARD()
+    return loaded;
+}
+
 LRESULT Sidebar_OnNotify(const NMHDR* notification)
 {
     if (notification->hwndFrom != s_tree) {
         return 0;
     }
-    if (notification->code == TVN_ITEMEXPANDINGW) {
+    if (notification->code == NM_CLICK) {
+        TVHITTESTINFO hit = { 0 };
+        if (s_clickPointValid) {
+            hit.pt = s_clickPoint;
+        } else {
+            DWORD const position = GetMessagePos();
+            hit.pt.x = GET_X_LPARAM(position);
+            hit.pt.y = GET_Y_LPARAM(position);
+            ScreenToClient(s_tree, &hit.pt);
+        }
+        HTREEITEM const item = TreeView_HitTest(s_tree, &hit);
+        WCHAR name[MAX_PATH_EXPLICIT];
+        LPARAM kind;
+        if (item && (hit.flags & (TVHT_ONITEMLABEL | TVHT_ONITEMICON)) &&
+            _Sidebar_GetItem(item, name, &kind) && kind == SIDEBAR_FILE) {
+            HPATHL path = _Sidebar_ItemPath(item);
+            _Sidebar_OpenFile(path);
+            Path_Release(path);
+        }
+    } else if (notification->code == TVN_ITEMEXPANDINGW) {
         NMTREEVIEWW const* event = (NMTREEVIEWW const*)notification;
         if ((event->action & TVE_EXPAND) && event->itemNew.lParam == SIDEBAR_UNLOADED) {
             return _Sidebar_LoadChildren(event->itemNew.hItem) ? FALSE : TRUE;
@@ -443,7 +521,8 @@ bool Sidebar_Create(HWND parent)
                            0, 0, 0, 0, parent, (HMENU)IDC_SIDEBAR_TREE, Globals.hInstance, NULL);
     s_splitter = CreateWindowEx(0, WC_STATIC, NULL, WS_CHILD | WS_CLIPSIBLINGS,
                                0, 0, 0, 0, parent, (HMENU)IDC_SIDEBAR_SPLIT, Globals.hInstance, NULL);
-    if (!s_tree || !s_splitter || !SetWindowSubclass(s_splitter, _Sidebar_SplitterProc, 0, 0)) {
+    if (!s_tree || !s_splitter || !SetWindowSubclass(s_splitter, _Sidebar_SplitterProc, 0, 0) ||
+        !SetWindowSubclass(s_tree, _Sidebar_TreeProc, 0, 0)) {
         if (s_tree) { DestroyWindow(s_tree); }
         if (s_splitter) { DestroyWindow(s_splitter); }
         s_tree = s_splitter = NULL;

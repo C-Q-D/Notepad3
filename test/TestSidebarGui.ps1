@@ -2,6 +2,7 @@
 # The AHK assertions use messages addressed to the test window, never global input.
 param(
     [ValidateSet('A','B','C','D','E','F')][string]$Through = 'F',
+    [ValidateSet('All','C','D','E','F')][string]$Scenario = 'All',
     [string]$Executable = (Join-Path $PSScriptRoot '..\Bin\Release_x64_v143\Notepad3.exe')
 )
 $ErrorActionPreference = 'Stop'
@@ -37,7 +38,7 @@ PreferredLanguageLocaleName=en-US
     $info.CreateNoWindow = $true
     $info.RedirectStandardOutput = $true
     $info.RedirectStandardError = $true
-    foreach ($argument in @('/ErrorStdOut', (Join-Path $PSScriptRoot 'TestSidebarGui.ahk'), $temp, $Through)) {
+    foreach ($argument in @('/ErrorStdOut', (Join-Path $PSScriptRoot 'TestSidebarGui.ahk'), $temp, $Through, $Scenario)) {
         [void]$info.ArgumentList.Add($argument)
     }
     $runner = [Diagnostics.Process]::Start($info)
