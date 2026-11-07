@@ -243,6 +243,7 @@ BEGIN
     "B",            IDM_EDIT_FINDMATCHINGBRACE,       VIRTKEY, CONTROL, NOINVERT
     "B",            IDM_EDIT_PADWITHSPACES,           VIRTKEY, ALT, NOINVERT  /// NO Menu
     "B",            IDM_EDIT_SELTOMATCHINGBRACE,      VIRTKEY, SHIFT, CONTROL, NOINVERT
+    "B",            IDM_VIEW_SIDEBAR,                 VIRTKEY, SHIFT, ALT, NOINVERT
     "B",            IDM_EDIT_REMOVEBLANKLINES,        VIRTKEY, CONTROL, ALT, NOINVERT
     "C",            IDM_EDIT_COPY,                    VIRTKEY, CONTROL, NOINVERT
     "C",            IDM_EDIT_COPYALL,                 VIRTKEY, ALT, NOINVERT  /// NO Menu

@@ -44,6 +44,7 @@
 #include "VersionEx.h"
 #include "MuiLanguage.h"
 #include "Notepad3.h"
+#include "Sidebar.h"
 #include "Config/Config.h"
 #include "DarkMode/DarkMode.h"
 #include "Notepad3Util.h"
@@ -3193,6 +3194,10 @@ LRESULT MsgCreate(HWND hwnd, WPARAM wParam,LPARAM lParam)
     // Create Toolbar and Statusbar
     CreateBars(hwnd, hInstance);
 
+    if (!Sidebar_Create(hwnd)) {
+        return -1;
+    }
+
     // Window Initialization
 
     (void)CreateWindowEx(
@@ -3741,6 +3746,8 @@ LRESULT MsgThemeChanged(HWND hwnd, WPARAM wParam,LPARAM lParam)
         // recreate toolbar and statusbar
         CreateBars(hwnd, Globals.hInstance);
 
+        Sidebar_OnThemeChanged();
+
         Style_ResetCurrentLexer(Globals.hwndEdit);
 
         Sci_RedrawScrollbars();
@@ -3824,6 +3831,13 @@ LRESULT MsgSize(HWND hwnd, WPARAM wParam, LPARAM lParam)
     }
 
 
+    // Statusbar sectors use the full client width, independent of the editor.
+    s_WinCurrentWidth = cx;
+    RECT available = { x, y, x + cx, y + cy };
+    Sidebar_Layout(&available);
+    x = available.left;
+    cx = max_i(0, available.right - available.left);
+
     HDWP const hdwp = BeginDeferWindowPos(2);
 
     DeferWindowPos(hdwp,s_hwndEditFrame,NULL,x,y,cx,cy, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -3833,8 +3847,6 @@ LRESULT MsgSize(HWND hwnd, WPARAM wParam, LPARAM lParam)
                    SWP_NOZORDER | SWP_NOACTIVATE);
 
     EndDeferWindowPos(hdwp);
-
-    s_WinCurrentWidth = cx;
 
     UpdateToolbar_Now(hwnd);
     UpdateMargins(true);
@@ -5210,6 +5222,7 @@ LRESULT MsgInitMenu(HWND hwnd, WPARAM wParam, LPARAM lParam)
     CheckCmd(hmenu, IDM_VIEW_TOOLBAR, Settings.ShowToolbar);
     EnableCmd(hmenu, IDM_VIEW_CUSTOMIZETB, Settings.ShowToolbar);
     CheckCmd(hmenu, IDM_VIEW_STATUSBAR, Settings.ShowStatusbar);
+    CheckCmd(hmenu, IDM_VIEW_SIDEBAR, Settings.ShowSidebar);
     CheckCmd(hmenu, IDM_VIEW_DPISCALETB, Settings.DpiScaleToolBar);
 
     CheckCmd(hmenu, IDM_VIEW_STICKYWINPOS, Flags.bStickyWindowPosition);
@@ -7508,6 +7521,12 @@ static bool _HandleViewAndSettingsCommands(HWND hwnd, UINT umsg, WPARAM wParam, 
     case IDM_VIEW_DPISCALETB:
         Settings.DpiScaleToolBar = !Settings.DpiScaleToolBar;
         SendMessage(hwnd, WM_THEMECHANGED, 0, 0);
+        break;
+
+    case IDM_VIEW_SIDEBAR:
+        Settings.ShowSidebar = !Settings.ShowSidebar;
+        Sidebar_Show(Settings.ShowSidebar);
+        UpdateUI(hwnd);
         break;
 
     case IDM_VIEW_STATUSBAR:
