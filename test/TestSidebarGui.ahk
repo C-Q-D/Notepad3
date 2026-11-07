@@ -24,6 +24,23 @@ try {
     Check(ex <= 4, 'A hidden sidebar restores editor left edge (actual ' ex ')')
     PostMessage(0x111, 41066, 0, , main)
     WaitUntil(() => DllCall('IsWindowVisible', 'ptr', tree), 'A show command restores tree')
+    if Ord(through) >= Ord('B') {
+        root := SendMessage(0x110A, 0, 0, tree)
+        Check(root != 0, 'B root exists')
+        Check(TreeText(tree, root) = 'fixture', 'B root is test directory name')
+        child := SendMessage(0x110A, 4, root, tree)
+        Check(TreeText(tree, child) = 'sub', 'B folders sort first')
+        aItem := SendMessage(0x110A, 1, child, tree)
+        Check(TreeText(tree, aItem) = 'a.txt', 'B alphabetical file order')
+        bItem := SendMessage(0x110A, 1, aItem, tree)
+        Check(TreeText(tree, bItem) = 'b2.txt', 'B natural order b2 before b10')
+        last := SendMessage(0x110A, 1, bItem, tree)
+        Check(TreeText(tree, last) = 'b10.txt' && SendMessage(0x110A, 1, last, tree) = 0, 'B complete first level order')
+        Check(SendMessage(0x110A, 9, 0, tree) = aItem, 'B command line file selected')
+        SendMessage(0x1102, 2, child, tree)
+        inner := SendMessage(0x110A, 4, child, tree)
+        Check(TreeText(tree, inner) = 'inner.txt', 'B expanding sub loads inner.txt')
+    }
     PostMessage(0x10, 0, 0, , main)
     Check(WinWaitClose(main, , 5), 'A normal close completes')
     WaitUntil(() => !ProcessExist(testPid), 'A process exits after settings save', 5000)
@@ -50,6 +67,34 @@ try {
     }
 }
 ExitApp(exitCode)
+
+; Read a real remote TVITEMW. Native common controls require target-process buffers.
+TreeText(tree, item) {
+    global testPid
+    if !item
+        return ''
+    process := DllCall('OpenProcess', 'uint', 0x438, 'int', false, 'uint', testPid, 'ptr')
+    memory := DllCall('VirtualAllocEx', 'ptr', process, 'ptr', 0, 'uptr', 4096, 'uint', 0x3000, 'uint', 4, 'ptr')
+    try {
+        if !process || !memory
+            throw Error('Cannot allocate remote TreeView buffer')
+        data := Buffer(4096, 0)
+        NumPut('uint', 1, data, 0)
+        NumPut('ptr', item, data, 8)
+        NumPut('ptr', memory + 128, data, 24)
+        NumPut('int', 256, data, 32)
+        DllCall('WriteProcessMemory', 'ptr', process, 'ptr', memory, 'ptr', data, 'uptr', 4096, 'ptr', 0)
+        if !SendMessage(0x113E, 0, memory, tree)
+            throw Error('TVM_GETITEMW failed')
+        DllCall('ReadProcessMemory', 'ptr', process, 'ptr', memory, 'ptr', data, 'uptr', 4096, 'ptr', 0)
+        return StrGet(data.Ptr + 128, 'UTF-16')
+    } finally {
+        if memory
+            DllCall('VirtualFreeEx', 'ptr', process, 'ptr', memory, 'uptr', 0, 'uint', 0x8000)
+        if process
+            DllCall('CloseHandle', 'ptr', process)
+    }
+}
 
 ; Read the UTF-8 INI written by SimpleIni. Win32 IniRead assumes ANSI or UTF-16.
 ReadSetting(path, key) {

@@ -1,7 +1,10 @@
 // Folder sidebar policies and native TreeView UI. File I/O remains owned by Notepad3.
 #include "Helpers.h"
 #include <shlwapi.h>
+#include <shellapi.h>
+#include <stdlib.h>
 #include "Sidebar.h"
+#include "PathLib.h"
 #include "Notepad3.h"
 #include "Dialogs.h"
 #include "DarkMode/DarkMode.h"
@@ -9,6 +12,112 @@
 static HWND s_tree = NULL;
 static HWND s_splitter = NULL;
 static int _Sidebar_ClampWidth(int logicalWidth, int clientWidth, UINT dpi);
+
+// Icon indices belong to the shared Shell image list; never destroy that list.
+typedef struct SidebarIcon {
+    WCHAR extension[MAX_PATH_EXPLICIT];
+    int index;
+} SidebarIcon;
+static SidebarIcon s_icons[256];
+static size_t s_iconCount = 0;
+static int s_folderIcon = 0;
+
+// lParam encodes only node kind/loading state. Full paths are reconstructed from
+// ancestors so large trees do not retain a second path string for every entry.
+enum { SIDEBAR_FILE = 0, SIDEBAR_UNLOADED = 1, SIDEBAR_LOADED = 2 };
+
+// Read an existing item's name and kind into caller-owned storage (256 WCHARs).
+// False means that the item no longer exists; no returned buffer is borrowed.
+static bool _Sidebar_GetItem(HTREEITEM item, LPWSTR name, LPARAM* kind)
+{
+    TVITEMW value = { 0 };
+    value.mask = TVIF_TEXT | TVIF_PARAM;
+    value.hItem = item;
+    value.pszText = name;
+    value.cchTextMax = MAX_PATH_EXPLICIT;
+    bool const found = TreeView_GetItem(s_tree, &value) != FALSE;
+    *kind = value.lParam;
+    return found;
+}
+
+// Return a new owned path for item, or an empty handle for NULL. The caller releases it.
+static HPATHL _Sidebar_ItemPath(HTREEITEM item)
+{
+    HPATHL result = Path_Allocate(NULL);
+    if (!item) {
+        return result;
+    }
+    HSTRINGW relative = StrgCreate(NULL);
+    HTREEITEM const root = TreeView_GetRoot(s_tree);
+    while (item && item != root) {
+        WCHAR name[MAX_PATH_EXPLICIT];
+        LPARAM kind;
+        if (!_Sidebar_GetItem(item, name, &kind)) {
+            StrgDestroy(relative);
+            return result;
+        }
+        if (StrgGetLength(relative)) {
+            StrgInsertCh(relative, 0, L'\\');
+        }
+        StrgInsert(relative, 0, name);
+        item = TreeView_GetParent(s_tree, item);
+    }
+    Path_Reset(result, Path_Get(Settings.SidebarFolder));
+    if (StrgGetLength(relative)) {
+        Path_Append(result, StrgGet(relative));
+    }
+    StrgDestroy(relative);
+    return result;
+}
+
+// Resolve a file-type icon without touching the file. Cache up to 256 extensions;
+// uncommon extensions beyond that bound are still resolved using the Shell API.
+static int _Sidebar_Icon(LPCWSTR name, bool directory)
+{
+    if (directory) {
+        return s_folderIcon;
+    }
+    LPCWSTR const extension = PathFindExtensionW(name);
+    for (size_t i = 0; i < s_iconCount; ++i) {
+        if (CompareStringOrdinal(extension, -1, s_icons[i].extension, -1, TRUE) == CSTR_EQUAL) {
+            return s_icons[i].index;
+        }
+    }
+    WCHAR lookup[MAX_PATH_EXPLICIT + 8];
+    StringCchPrintf(lookup, COUNTOF(lookup), L"file%s", extension);
+    SHFILEINFOW info = { 0 };
+    SHGetFileInfoW(lookup, FILE_ATTRIBUTE_NORMAL, &info, sizeof(info),
+                  SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
+    if (s_iconCount < COUNTOF(s_icons)) {
+        StringCchCopy(s_icons[s_iconCount].extension, COUNTOF(s_icons[s_iconCount].extension), extension);
+        s_icons[s_iconCount++].index = info.iIcon;
+    }
+    return info.iIcon;
+}
+
+// Insert one enumerated name under parent; directory nodes get a lazy-load marker.
+// The returned handle belongs to TreeView and is invalidated by collapse/reset.
+static HTREEITEM _Sidebar_Insert(HTREEITEM parent, LPCWSTR name, bool directory)
+{
+    TVINSERTSTRUCTW entry = { 0 };
+    entry.hParent = parent;
+    entry.hInsertAfter = TVI_LAST;
+    entry.item.mask = TVIF_TEXT | TVIF_PARAM | TVIF_IMAGE | TVIF_SELECTEDIMAGE | TVIF_CHILDREN;
+    entry.item.pszText = (LPWSTR)name;
+    entry.item.lParam = directory ? SIDEBAR_UNLOADED : SIDEBAR_FILE;
+    entry.item.iImage = entry.item.iSelectedImage = _Sidebar_Icon(name, directory);
+    entry.item.cChildren = directory ? 1 : 0;
+    return TreeView_InsertItem(s_tree, &entry);
+}
+
+// Remove actual children without expanding the parent or processing user commands.
+static void _Sidebar_ClearChildren(HTREEITEM parent)
+{
+    HTREEITEM child;
+    while ((child = TreeView_GetChild(s_tree, parent)) != NULL) {
+        TreeView_DeleteItem(s_tree, child);
+    }
+}
 
 // Resize only while this splitter owns mouse capture. Coordinates are converted
 // to the parent so dragging remains stable when the child moves under the mouse.
@@ -84,6 +193,248 @@ static int _Sidebar_ClampWidth(int logicalWidth, int clientWidth, UINT dpi)
     return requested < minimum ? minimum : (requested > maximum ? maximum : requested);
 }
 
+// qsort adapter for WIN32_FIND_DATAW entries; names use the tested natural order.
+static int __cdecl _Sidebar_CompareFindData(const void* left, const void* right)
+{
+    WIN32_FIND_DATAW const* a = left;
+    WIN32_FIND_DATAW const* b = right;
+    return _Sidebar_CompareEntries((a->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0, a->cFileName,
+                                   (b->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0, b->cFileName);
+}
+
+// Enumerate one directory synchronously. On allocation or enumeration failure,
+// retain the unloaded state so a later expansion can retry; never show a dialog.
+static bool _Sidebar_LoadChildren(HTREEITEM parent)
+{
+    HPATHL pattern = _Sidebar_ItemPath(parent);
+    Path_Append(pattern, L"*");
+    WIN32_FIND_DATAW data;
+    HANDLE const search = Path_FindFirstFile(pattern, &data);
+    DWORD const firstError = GetLastError();
+    Path_Release(pattern);
+    if (search == INVALID_HANDLE_VALUE && firstError != ERROR_FILE_NOT_FOUND) {
+        return false;
+    }
+    HCURSOR const cursor = SetCursor(LoadCursor(NULL, IDC_WAIT));
+    SendMessage(s_tree, WM_SETREDRAW, FALSE, 0);
+    WIN32_FIND_DATAW* entries = NULL;
+    size_t count = 0, capacity = 0;
+    bool success = true;
+    if (search != INVALID_HANDLE_VALUE) {
+        do {
+            if (wcscmp(data.cFileName, L".") == 0 || wcscmp(data.cFileName, L"..") == 0) {
+                continue;
+            }
+            if (count == capacity) {
+                size_t const next = capacity ? (capacity <= SIZE_MAX / 2 ? capacity * 2 : 0) : 64;
+                WIN32_FIND_DATAW* grown = next && next <= SIZE_MAX / sizeof(*entries) ? ReAllocMem(entries, next * sizeof(*entries), 0) : NULL;
+                if (!grown) {
+                    success = false;
+                    break;
+                }
+                entries = grown;
+                capacity = next;
+            }
+            entries[count++] = data;
+        } while (FindNextFileW(search, &data));
+        if (success && GetLastError() != ERROR_NO_MORE_FILES) {
+            success = false;
+        }
+        FindClose(search);
+    }
+    if (success) {
+        if (count > 1) {
+            qsort(entries, count, sizeof(*entries), _Sidebar_CompareFindData);
+        }
+        _Sidebar_ClearChildren(parent);
+        for (size_t i = 0; i < count; ++i) {
+            if (!_Sidebar_Insert(parent, entries[i].cFileName, (entries[i].dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)) {
+                success = false;
+                break;
+            }
+        }
+        TVITEMW state = { 0 };
+        state.mask = TVIF_PARAM | TVIF_CHILDREN;
+        state.hItem = parent;
+        state.lParam = success ? SIDEBAR_LOADED : SIDEBAR_UNLOADED;
+        state.cChildren = count ? 1 : 0;
+        TreeView_SetItem(s_tree, &state);
+    }
+    FreeMem(entries);
+    SendMessage(s_tree, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(s_tree, NULL, TRUE);
+    SetCursor(cursor);
+    return success;
+}
+
+// Resolve a path below the current root, expanding ancestors only as needed.
+// When refreshMissing is true, retry a missing child once in its loaded parent.
+static HTREEITEM _Sidebar_FindPath(const HPATHL path, bool refreshMissing)
+{
+    HTREEITEM parent = TreeView_GetRoot(s_tree);
+    LPCWSTR const root = Path_Get(Settings.SidebarFolder);
+    LPCWSTR const target = Path_Get(path);
+    size_t const length = wcslen(root);
+    size_t const targetLength = wcslen(target);
+    if (!parent || !length || targetLength < length ||
+        CompareStringOrdinal(root, (int)length, target, (int)length, TRUE) != CSTR_EQUAL ||
+        (targetLength > length && root[length - 1] != L'\\' && target[length] != L'\\')) {
+        return NULL;
+    }
+    LPCWSTR part = target + length;
+    while (*part == L'\\') { ++part; }
+    while (*part) {
+        LPCWSTR end = wcschr(part, L'\\');
+        size_t const size = end ? (size_t)(end - part) : wcslen(part);
+        if (size >= MAX_PATH_EXPLICIT) {
+            return NULL;
+        }
+        WCHAR component[MAX_PATH_EXPLICIT];
+        StringCchCopyN(component, COUNTOF(component), part, size);
+        WCHAR name[MAX_PATH_EXPLICIT];
+        LPARAM kind;
+        if (!_Sidebar_GetItem(parent, name, &kind) || kind == SIDEBAR_FILE) {
+            return NULL;
+        }
+        if (kind == SIDEBAR_UNLOADED && !_Sidebar_LoadChildren(parent)) {
+            return NULL;
+        }
+        TreeView_Expand(s_tree, parent, TVE_EXPAND);
+        HTREEITEM match = NULL;
+        for (int attempt = 0; attempt < (refreshMissing ? 2 : 1); ++attempt) {
+            for (HTREEITEM child = TreeView_GetChild(s_tree, parent); child; child = TreeView_GetNextSibling(s_tree, child)) {
+                if (_Sidebar_GetItem(child, name, &kind) && CompareStringOrdinal(component, -1, name, -1, TRUE) == CSTR_EQUAL) {
+                    match = child;
+                    break;
+                }
+            }
+            if (match || !refreshMissing || attempt || !_Sidebar_LoadChildren(parent)) {
+                break;
+            }
+        }
+        if (!match) {
+            return NULL;
+        }
+        parent = match;
+        part += size;
+        while (*part == L'\\') { ++part; }
+    }
+    return parent;
+}
+
+void Sidebar_SetRoot(const HPATHL folder)
+{
+    if (!s_tree) {
+        return;
+    }
+    HPATHL normalized = Path_Copy(folder);
+    TreeView_DeleteAllItems(s_tree);
+    if (Path_IsExistingDirectory(normalized)) {
+        Path_CanonicalizeEx(normalized, Paths.WorkingDirectory);
+        Path_Reset(Settings.SidebarFolder, Path_Get(normalized));
+        LPCWSTR const name = Path_FindFileName(normalized);
+        HTREEITEM const root = _Sidebar_Insert(TVI_ROOT, *name ? name : Path_Get(normalized), true);
+        if (root) {
+            TreeView_Expand(s_tree, root, TVE_EXPAND);
+        }
+    }
+    Path_Release(normalized);
+}
+
+void Sidebar_SyncToFile(const HPATHL file)
+{
+    if (!s_tree || !Settings.ShowSidebar || !TreeView_GetRoot(s_tree)) {
+        return;
+    }
+    HTREEITEM const item = Path_IsNotEmpty(file) ? _Sidebar_FindPath(file, true) : NULL;
+    TreeView_SelectItem(s_tree, item);
+    if (item) {
+        TreeView_EnsureVisible(s_tree, item);
+    }
+}
+
+// Temporary refresh state owns its paths only until the tree has been rebuilt.
+typedef struct SidebarExpanded {
+    HPATHL path;
+    struct SidebarExpanded* next;
+} SidebarExpanded;
+
+void Sidebar_Refresh(void)
+{
+    if (!s_tree || !TreeView_GetRoot(s_tree)) {
+        return;
+    }
+    HPATHL selected = _Sidebar_ItemPath(TreeView_GetSelection(s_tree));
+    SidebarExpanded* expanded = NULL;
+    HTREEITEM const root = TreeView_GetRoot(s_tree);
+    bool const rootExpanded = (TreeView_GetItemState(s_tree, root, TVIS_EXPANDED) & TVIS_EXPANDED) != 0;
+    HTREEITEM item = root;
+    while (item) {
+        if (TreeView_GetItemState(s_tree, item, TVIS_EXPANDED) & TVIS_EXPANDED) {
+            SidebarExpanded* saved = AllocMem(sizeof(*saved), HEAP_ZERO_MEMORY);
+            if (!saved) {
+                // Leave the existing tree intact when its state cannot be retained.
+                while (expanded) {
+                    SidebarExpanded* next = expanded->next;
+                    Path_Release(expanded->path);
+                    FreeMem(expanded);
+                    expanded = next;
+                }
+                Path_Release(selected);
+                return;
+            }
+            saved->path = _Sidebar_ItemPath(item);
+            saved->next = expanded;
+            expanded = saved;
+        }
+        HTREEITEM next = TreeView_GetChild(s_tree, item);
+        while (!next && item) {
+            next = TreeView_GetNextSibling(s_tree, item);
+            item = TreeView_GetParent(s_tree, item);
+        }
+        item = next;
+    }
+    Sidebar_SetRoot(Settings.SidebarFolder);
+    while (expanded) {
+        SidebarExpanded* next = expanded->next;
+        HTREEITEM const found = _Sidebar_FindPath(expanded->path, false);
+        if (found) { TreeView_Expand(s_tree, found, TVE_EXPAND); }
+        Path_Release(expanded->path);
+        FreeMem(expanded);
+        expanded = next;
+    }
+    TreeView_SelectItem(s_tree, Path_IsNotEmpty(selected) ? _Sidebar_FindPath(selected, false) : NULL);
+    if (!rootExpanded) {
+        TreeView_Expand(s_tree, TreeView_GetRoot(s_tree), TVE_COLLAPSE);
+    }
+    Path_Release(selected);
+}
+
+LRESULT Sidebar_OnNotify(const NMHDR* notification)
+{
+    if (notification->hwndFrom != s_tree) {
+        return 0;
+    }
+    if (notification->code == TVN_ITEMEXPANDINGW) {
+        NMTREEVIEWW const* event = (NMTREEVIEWW const*)notification;
+        if ((event->action & TVE_EXPAND) && event->itemNew.lParam == SIDEBAR_UNLOADED) {
+            return _Sidebar_LoadChildren(event->itemNew.hItem) ? FALSE : TRUE;
+        }
+    } else if (notification->code == TVN_ITEMEXPANDEDW) {
+        NMTREEVIEWW const* event = (NMTREEVIEWW const*)notification;
+        if (event->action == TVE_COLLAPSE) {
+            TVITEMW state = { 0 };
+            state.mask = TVIF_PARAM | TVIF_CHILDREN;
+            state.hItem = event->itemNew.hItem;
+            state.lParam = SIDEBAR_UNLOADED;
+            state.cChildren = 1;
+            TreeView_SetItem(s_tree, &state);
+            TreeView_Expand(s_tree, state.hItem, TVE_COLLAPSE | TVE_COLLAPSERESET);
+        }
+    }
+    return 0;
+}
+
 bool Sidebar_Create(HWND parent)
 {
     s_tree = CreateWindowEx(WS_EX_CLIENTEDGE, WC_TREEVIEW, NULL,
@@ -100,7 +451,9 @@ bool Sidebar_Create(HWND parent)
     }
     TreeView_SetExtendedStyle(s_tree, TVS_EX_DOUBLEBUFFER, TVS_EX_DOUBLEBUFFER);
     Sidebar_OnThemeChanged();
-    Sidebar_Show(Settings.ShowSidebar);
+    // Root restoration is deferred until after startup's FileLoad.
+    ShowWindow(s_tree, Settings.ShowSidebar ? SW_SHOWNA : SW_HIDE);
+    ShowWindow(s_splitter, Settings.ShowSidebar ? SW_SHOWNA : SW_HIDE);
     return true;
 }
 
@@ -111,6 +464,12 @@ void Sidebar_Show(bool visible)
     }
     if (!visible && (GetFocus() == s_tree || GetFocus() == s_splitter)) {
         SetFocus(Globals.hwndEdit);
+    }
+    if (visible && !TreeView_GetRoot(s_tree) && Path_IsExistingDirectory(Settings.SidebarFolder)) {
+        Sidebar_SetRoot(Settings.SidebarFolder);
+    }
+    if (visible) {
+        Sidebar_SyncToFile(Paths.CurrentFile);
     }
     ShowWindow(s_tree, visible ? SW_SHOWNA : SW_HIDE);
     ShowWindow(s_splitter, visible ? SW_SHOWNA : SW_HIDE);
@@ -137,6 +496,12 @@ void Sidebar_OnThemeChanged(void)
     }
     InitWindowCommon(s_tree, true);
     InitTreeView(s_tree);
+    s_iconCount = 0;
+    SHFILEINFOW info = { 0 };
+    HIMAGELIST const images = (HIMAGELIST)SHGetFileInfoW(L"C:\\", FILE_ATTRIBUTE_DIRECTORY, &info, sizeof(info),
+                                                     SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
+    TreeView_SetImageList(s_tree, images, TVSIL_NORMAL);
+    s_folderIcon = info.iIcon;
 #ifdef D_NP3_WIN10_DARK_MODE
     AllowDarkModeForWindowEx(s_tree, UseDarkMode());
     AllowDarkModeForWindowEx(s_splitter, UseDarkMode());

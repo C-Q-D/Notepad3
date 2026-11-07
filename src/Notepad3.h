@@ -65,6 +65,7 @@ np3params, *LPnp3params;
 #define IDC_FILEMRU_UPDATE_VIEW    (WM_USER + 4)
 //#define WM_CHANGENOTIFYCLEAR     (WM_USER + 5)
 #define WM_NEWWINDOWREQUEST        (WM_USER + 6)       // File > New Window, requested by a taskbar Shift+Click instance
+#define WM_SIDEBAR_RESTORE         (WM_USER + 7)       // Restore folder after startup has loaded the document.
 
 //==== Timer ==================================================================
 #define ID_WATCHTIMER       (0xA000)        // File Watching

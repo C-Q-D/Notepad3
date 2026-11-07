@@ -14,10 +14,9 @@ try {
     Copy-Item -LiteralPath $Executable -Destination (Join-Path $temp 'Notepad3.exe')
     $data = Join-Path $temp 'fixture'
     [void](New-Item -ItemType Directory -Path (Join-Path $data 'sub'))
-    foreach ($file in @('a.txt','b2.txt','b10.txt','ro.txt','sub\inner.txt')) {
+    foreach ($file in @('a.txt','b2.txt','b10.txt','sub\inner.txt')) {
         Set-Content -LiteralPath (Join-Path $data $file) -Value "original $file" -Encoding utf8
     }
-    (Get-Item -LiteralPath (Join-Path $data 'ro.txt')).IsReadOnly = $true
     @"
 [Settings]
 SettingsVersion=5

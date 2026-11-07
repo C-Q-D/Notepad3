@@ -2642,6 +2642,13 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT umsg, WPARAM wParam, LPARAM lParam)
     case WM_NOTIFY:
         return MsgNotify(hwnd, wParam, lParam);
 
+    case WM_SIDEBAR_RESTORE:
+        if (Settings.ShowSidebar && Path_IsExistingDirectory(Settings.SidebarFolder)) {
+            Sidebar_SetRoot(Settings.SidebarFolder);
+            Sidebar_SyncToFile(Paths.CurrentFile);
+        }
+        return 0;
+
     //~case WM_KEYDOWN:
     //~    return MsgKeyDown(hwnd, wParam, lParam);
 
@@ -3197,6 +3204,7 @@ LRESULT MsgCreate(HWND hwnd, WPARAM wParam,LPARAM lParam)
     if (!Sidebar_Create(hwnd)) {
         return -1;
     }
+    PostMessage(hwnd, WM_SIDEBAR_RESTORE, 0, 0);
 
     // Window Initialization
 
@@ -5511,6 +5519,23 @@ static bool _HandleFileCommands(HWND hwnd, UINT umsg, WPARAM wParam, LPARAM lPar
         InstallFileWatching(true);
         break;
 
+
+    case IDM_FILE_OPENFOLDER: {
+        WCHAR title[SMALL_BUFFER];
+        GetLngString(IDS_MUI_OPENFOLDER_TITLE, title, COUNTOF(title));
+        HPATHL folder = Path_Copy(Path_IsNotEmpty(Settings.SidebarFolder) ? Settings.SidebarFolder : Paths.CurrentFile);
+        if (Path_IsNotEmpty(Paths.CurrentFile) && Path_IsEmpty(Settings.SidebarFolder)) {
+            Path_RemoveFileSpec(folder);
+        }
+        if (Path_BrowseDirectory(hwnd, title, folder, Path_IsNotEmpty(folder) ? folder : Paths.WorkingDirectory, true)) {
+            Settings.ShowSidebar = true;
+            Sidebar_SetRoot(folder);
+            Sidebar_Show(true);
+            Sidebar_SyncToFile(Paths.CurrentFile);
+            UpdateUI(hwnd);
+        }
+        Path_Release(folder);
+    } break;
 
     case IDM_FILE_BROWSE:
         DialogFileBrowse(hwnd);
@@ -10233,6 +10258,11 @@ static bool s_tb_reset_already = false;
 LRESULT MsgNotify(HWND hwnd, WPARAM wParam, LPARAM lParam)
 {
     UNREFERENCED_PARAMETER(wParam);
+    // FileLoad can synchronously expand the tree during an editor notification.
+    // Tree notifications must therefore precede the editor's reentrancy guard.
+    if (((NMHDR*)lParam)->idFrom == IDC_SIDEBAR_TREE) {
+        return Sidebar_OnNotify((NMHDR*)lParam);
+    }
     LRESULT result = FALSE;
 
     SET_FCT_GUARD(result)
@@ -12243,6 +12273,7 @@ bool FileLoad(const HPATHL hfile_pth, const FileLoadFlags fLoadFlags, const DocP
             ShowZoomCallTip();
         }
 
+        Sidebar_SyncToFile(Paths.CurrentFile);
         return true;
     }
 
@@ -12500,6 +12531,9 @@ bool FileLoad(const HPATHL hfile_pth, const FileLoadFlags fLoadFlags, const DocP
     }
     UpdateToolbar_Now(Globals.hwndMain);
 
+    if (fSuccess) {
+        Sidebar_SyncToFile(Paths.CurrentFile);
+    }
     return fSuccess;
 }
 
@@ -12931,6 +12965,7 @@ bool FileSave(FileSaveFlags fSaveFlags)
     if (fSuccess) {
         AutoSaveStop();
         ResetFileObservationData(true);
+        Sidebar_SyncToFile(Paths.CurrentFile);
     }
 
     UpdateToolbar();
