@@ -209,6 +209,7 @@ BEGIN
     IDS_MUI_MRU_COPY_FULLPATH "Volledig &pad kopiëren"
     IDS_MUI_MRU_COPY_DIRPATH "Mappad kopiëren"
     IDS_MUI_MRU_COPY_FILENAME "Bestands&naam kopiëren"
+    IDS_MUI_OPENFOLDER_TITLE "Select folder to show in the sidebar"
     IDS_MUI_URL_DIR_EXISTS   "URL opgegeven map bestaat!"
     IDS_MUI_URL_FILE_EXISTS  "URL opgegeven bestand bestaat!"
     IDS_MUI_URL_PATH_NOT_FOUND

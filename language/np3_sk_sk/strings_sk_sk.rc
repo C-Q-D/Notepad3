@@ -209,6 +209,7 @@ BEGIN
     IDS_MUI_MRU_COPY_FULLPATH "&Kopírovať plnú cestu"
     IDS_MUI_MRU_COPY_DIRPATH "Kopírovať cestu k &adresáru"
     IDS_MUI_MRU_COPY_FILENAME "Kopírovať &názov súboru"
+    IDS_MUI_OPENFOLDER_TITLE "Select folder to show in the sidebar"
     IDS_MUI_URL_DIR_EXISTS   "URL zadaný adresár existuje!"
     IDS_MUI_URL_FILE_EXISTS  "URL zadaný súbor existuje!"
     IDS_MUI_URL_PATH_NOT_FOUND

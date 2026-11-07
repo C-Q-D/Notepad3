@@ -209,6 +209,7 @@ BEGIN
     IDS_MUI_MRU_COPY_FULLPATH "Copier le &chemin complet"
     IDS_MUI_MRU_COPY_DIRPATH "Copier le chemin &d'accès au répertoire"
     IDS_MUI_MRU_COPY_FILENAME "Copier le &nom du fichier"
+    IDS_MUI_OPENFOLDER_TITLE "Select folder to show in the sidebar"
     IDS_MUI_URL_DIR_EXISTS   "Le répertoire spécifié par l'URL existe !"
     IDS_MUI_URL_FILE_EXISTS  "Le fichier spécifié par l'URL existe !"
     IDS_MUI_URL_PATH_NOT_FOUND

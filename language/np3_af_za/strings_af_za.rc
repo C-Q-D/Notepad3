@@ -209,6 +209,7 @@ BEGIN
     IDS_MUI_MRU_COPY_FULLPATH "Kopieer volledige &pad"
     IDS_MUI_MRU_COPY_DIRPATH "Kopieer gi&ds-pad"
     IDS_MUI_MRU_COPY_FILENAME "Kopieer lêer&naam"
+    IDS_MUI_OPENFOLDER_TITLE "Select folder to show in the sidebar"
     IDS_MUI_URL_DIR_EXISTS   "URL gespesifiseerde gids bestaan!"
     IDS_MUI_URL_FILE_EXISTS  "URL gespesifiseerde lêer bestaan!"
     IDS_MUI_URL_PATH_NOT_FOUND

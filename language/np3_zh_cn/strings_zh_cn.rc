@@ -209,6 +209,7 @@ BEGIN
     IDS_MUI_MRU_COPY_FULLPATH "复制完整路径(&P)"
     IDS_MUI_MRU_COPY_DIRPATH "复制文件夹路径(&D)"
     IDS_MUI_MRU_COPY_FILENAME "复制文件名(&N)"
+    IDS_MUI_OPENFOLDER_TITLE "选择要在侧栏中显示的文件夹"
     IDS_MUI_URL_DIR_EXISTS   "URL 指定的文件夹已存在！"
     IDS_MUI_URL_FILE_EXISTS  "URL 指定的文件已存在！"
     IDS_MUI_URL_PATH_NOT_FOUND

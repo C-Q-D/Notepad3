@@ -209,6 +209,7 @@ BEGIN
     IDS_MUI_MRU_COPY_FULLPATH "複製完整路徑(&P)"
     IDS_MUI_MRU_COPY_DIRPATH "複製資料夾路徑(&D)"
     IDS_MUI_MRU_COPY_FILENAME "複製檔名(&N)"
+    IDS_MUI_OPENFOLDER_TITLE "Select folder to show in the sidebar"
     IDS_MUI_URL_DIR_EXISTS   "URL 指定資料夾存在！"
     IDS_MUI_URL_FILE_EXISTS  "URL 指定檔案存在！"
     IDS_MUI_URL_PATH_NOT_FOUND
