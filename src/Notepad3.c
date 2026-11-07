@@ -312,6 +312,11 @@ static inline bool IsSaveNeeded()
     return SciCall_GetModify() || s_NeedSavingForced;
 }
 
+bool IsDocumentSaveNeeded(void)
+{
+    return IsSaveNeeded();
+}
+
 static inline void SetSaveNeeded(const bool bSetFlagForced)
 {
     AutoSaveStart(!s_NeedSavingForced);
@@ -14034,14 +14039,15 @@ void AutoSaveStop()
 
 //=============================================================================
 //
-//  AutoSaveDoWork()
+//  AutoSaveDoWork(): save with the existing auto-save path and return its result.
+//  fSaveFlags adds caller options; true also means that no save was needed.
 //
-void AutoSaveDoWork(FileSaveFlags fSaveFlags)
+bool AutoSaveDoWork(FileSaveFlags fSaveFlags)
 {
-	if (!IsSaveNeeded()) {
-        return;
+    if (!IsSaveNeeded()) {
+        return true;
     }
-    FileSave(fSaveFlags | FSF_AutoSave);
+    return FileSave(fSaveFlags | FSF_AutoSave);
 }
 
 //=============================================================================

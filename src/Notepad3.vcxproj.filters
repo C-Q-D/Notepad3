@@ -57,6 +57,9 @@
     <ClCompile Include="Dlapi.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="Sidebar.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="Edit.c">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -462,6 +465,9 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Dlapi.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Sidebar.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Edit.h">

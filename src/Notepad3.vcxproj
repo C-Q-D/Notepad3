@@ -1056,6 +1056,7 @@
     <ClCompile Include="DarkMode\DarkMode.cpp" />
     <ClCompile Include="Dialogs.c" />
     <ClCompile Include="Dlapi.c" />
+    <ClCompile Include="Sidebar.c" />
     <ClCompile Include="Edit.c" />
     <ClCompile Include="EditRTF.cpp" />
     <ClCompile Include="Encoding.c" />
@@ -1183,6 +1184,7 @@
     <ClInclude Include="DarkMode\ListViewUtil.hpp" />
     <ClInclude Include="Dialogs.h" />
     <ClInclude Include="Dlapi.h" />
+    <ClInclude Include="Sidebar.h" />
     <ClInclude Include="Edit.h" />
     <ClInclude Include="EditRTF.h" />
     <ClInclude Include="Encoding.h" />

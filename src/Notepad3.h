@@ -149,7 +149,10 @@ void          InstallFileWatching(const bool bInstall);
 
 void AutoSaveStart(bool bReset);
 void AutoSaveStop();
-void AutoSaveDoWork(FileSaveFlags fSaveFlags);
+// Return false when saving was cancelled or failed; a clean document returns true.
+bool AutoSaveDoWork(FileSaveFlags fSaveFlags);
+// Includes both Scintilla edits and forced saves (for example encoding changes).
+bool IsDocumentSaveNeeded(void);
 void CALLBACK AutoSaveTimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWORD dwTime);
 
 //LPCWSTR BackupGetDefaultFolder(HPATHL hfile_pth_io);
