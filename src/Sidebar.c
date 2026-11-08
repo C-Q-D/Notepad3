@@ -238,6 +238,86 @@ static int _Sidebar_CompareEntries(bool bDirectory1, LPCWSTR name1, bool bDirect
     return StrCmpLogicalW(name1, name2);
 }
 
+// Compare non-null names and unsigned last-write ticks using SIDEBAR_SORT_* mode.
+// Directories precede files; equal extensions/times and unknown modes use natural
+// case-insensitive name order. Return negative/zero/positive for before/equal/after.
+static inline int _Sidebar_CompareSortedEntries(bool bDirectory1, LPCWSTR name1, ULONGLONG modified1, bool bDirectory2, LPCWSTR name2, ULONGLONG modified2, int sortMode)
+{
+    if (bDirectory1 != bDirectory2) {
+        return bDirectory1 ? -1 : 1;
+    }
+    if (sortMode == SIDEBAR_SORT_EXTENSION) {
+        int const extensionOrder = CompareStringOrdinal(PathFindExtensionW(name1), -1, PathFindExtensionW(name2), -1, TRUE) - CSTR_EQUAL;
+        if (extensionOrder) {
+            return extensionOrder;
+        }
+    } else if (sortMode == SIDEBAR_SORT_MODIFIED && modified1 != modified2) {
+        // Subtraction could overflow or truncate the 64-bit timestamp difference.
+        return modified1 > modified2 ? -1 : 1;
+    }
+    return _Sidebar_CompareEntries(bDirectory1, name1, bDirectory2, name2);
+}
+
+// Build a root-to-leaf prefix from ancestorLast[0..ancestorCount) and this row's
+// last-sibling flag. ancestorLast may be NULL only at depth zero. output must not
+// alias the inputs; cchOutput includes NUL. Return false and clear writable output
+// if storage is insufficient or inputs are invalid; never emit a partial prefix.
+static inline bool _Sidebar_BuildPrefix(const bool* ancestorLast, size_t ancestorCount, bool last, LPWSTR output, size_t cchOutput)
+{
+    if (!output || !cchOutput) {
+        return false;
+    }
+    output[0] = L'\0';
+    if ((ancestorCount && !ancestorLast) || cchOutput < 4 || ancestorCount > (cchOutput - 4) / 3) {
+        return false;
+    }
+    for (size_t i = 0; i < ancestorCount; ++i) {
+        output[3 * i] = ancestorLast[i] ? L' ' : L'\x2502';
+        output[3 * i + 1] = output[3 * i + 2] = L' ';
+    }
+    size_t const end = 3 * ancestorCount;
+    output[end] = last ? L'\x2514' : L'\x251c';
+    output[end + 1] = L'\x2500';
+    output[end + 2] = L' ';
+    output[end + 3] = L'\0';
+    return true;
+}
+
+// Classify a non-null filename by its final extension only, ignoring ordinal case.
+// No filesystem access or content sniffing: absent, bare-dot and unknown extensions
+// remain text candidates. The list follows the sidebar's editor-opening policy.
+static inline bool _Sidebar_IsBinary(LPCWSTR name)
+{
+    static LPCWSTR const extensions[] = {
+        L".exe", L".dll", L".mui", L".sys", L".obj", L".lib", L".pdb", L".ocx", L".cpl", L".drv", L".scr", L".com", L".bin",
+        L".png", L".jpg", L".jpeg", L".gif", L".bmp", L".ico", L".webp", L".tif", L".tiff",
+        L".zip", L".7z", L".rar", L".gz", L".tar", L".xz", L".cab", L".msi", L".iso"
+    };
+    LPCWSTR const extension = PathFindExtensionW(name);
+    for (size_t i = 0; i < sizeof(extensions) / sizeof(extensions[0]); ++i) {
+        if (CompareStringOrdinal(extension, -1, extensions[i], -1, TRUE) == CSTR_EQUAL) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Return the first case-insensitive ordinal match in UTF-16 code units, or -1.
+// name and query are non-null; an empty query matches at zero. Ordinal matching
+// handles Unicode case without stripping accents or depending on the user locale.
+static inline int _Sidebar_MatchName(LPCWSTR name, LPCWSTR query)
+{
+    return *query ? FindStringOrdinal(FIND_FROMSTART, name, -1, query, -1, TRUE) : 0;
+}
+
+// Classify 96-DPI logical width: 0 shows all; 1 hides Editing, recent folder and
+// root counts; 2 also hides header buttons, status label, hidden toggle and sort.
+// Widths below the minimum still use tier 2; layout owns enforcing that minimum.
+static inline int _Sidebar_WidthTier(int logicalWidth)
+{
+    return logicalWidth < 160 ? 2 : (logicalWidth < 220 ? 1 : 0);
+}
+
 // Apply the persisted logical range, convert to physical pixels and reserve 200
 // logical pixels for the editor. Extremely narrow windows retain the minimum.
 static int _Sidebar_ClampWidth(int logicalWidth, int clientWidth, UINT dpi)
@@ -354,6 +434,73 @@ static LPCWSTR _Sidebar_RelativePath(LPCWSTR root, LPCWSTR target)
     LPCWSTR part = target + length;
     while (*part == L'\\') { ++part; }
     return part;
+}
+
+// Abbreviate a canonical absolute folder (not a filename) relative to root, which
+// may be empty. Inputs are non-null and may use DOS/UNC extended prefixes; output
+// cannot alias them. cchOutput includes NUL. Keep the drive or UNC share and final
+// folder outside root, adding an ellipsis only when components are omitted.
+// Return false and clear writable output on invalid paths or insufficient storage.
+static inline bool _Sidebar_AbbreviateFolder(LPCWSTR root, LPCWSTR folder, LPWSTR output, size_t cchOutput)
+{
+    if (!output || !cchOutput) {
+        return false;
+    }
+    output[0] = L'\0';
+    LPCWSTR const relative = _Sidebar_RelativePath(root, folder);
+    HRESULT result;
+    if (relative) {
+        size_t const length = wcslen(relative);
+        result = length ? StringCchPrintf(output, cchOutput, L"%s%s", relative, relative[length - 1] == L'\\' ? L"" : L"\\")
+                        : StringCchCopy(output, cchOutput, L".\\");
+    } else {
+        LPCWSTR path = folder;
+        bool unc = false;
+        if (_wcsnicmp(path, L"\\\\?\\UNC\\", 8) == 0) {
+            path += 8;
+            unc = true;
+        } else if (wcsncmp(path, L"\\\\?\\", 4) == 0) {
+            path += 4;
+        } else if (wcsncmp(path, L"\\\\", 2) == 0) {
+            path += 2;
+            unc = true;
+        }
+        size_t length = wcslen(path);
+        while (length && path[length - 1] == L'\\') {
+            --length;
+        }
+        size_t anchorLength;
+        if (unc) {
+            LPCWSTR const serverEnd = wcschr(path, L'\\');
+            if (!serverEnd || serverEnd == path || !serverEnd[1]) {
+                return false;
+            }
+            LPCWSTR const shareEnd = wcschr(serverEnd + 1, L'\\');
+            anchorLength = shareEnd ? (size_t)(shareEnd - path) : length;
+            if (anchorLength <= (size_t)(serverEnd - path) + 1) {
+                return false;
+            }
+        } else {
+            if (length < 2 || path[1] != L':' || path[2] != L'\\') {
+                return false;
+            }
+            anchorLength = 2;
+        }
+        size_t leaf = length;
+        while (leaf && path[leaf - 1] != L'\\') {
+            --leaf;
+        }
+        if (length <= anchorLength || leaf <= anchorLength + 1) {
+            result = StringCchPrintf(output, cchOutput, L"%s%.*s\\", unc ? L"\\\\" : L"", (int)length, path);
+        } else {
+            result = StringCchPrintf(output, cchOutput, L"%s%.*s\\\x2026\\%.*s\\", unc ? L"\\\\" : L"", (int)anchorLength, path, (int)(length - leaf), path + leaf);
+        }
+    }
+    if (FAILED(result)) {
+        output[0] = L'\0';
+        return false;
+    }
+    return true;
 }
 
 // Resolve a path below the current root, expanding ancestors only as needed.
