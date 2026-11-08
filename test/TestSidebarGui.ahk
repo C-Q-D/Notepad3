@@ -242,6 +242,8 @@ try {
     FinishSidebarScenario('A restart')
     if Ord(through) >= Ord('B') && (scenario = 'All' || scenario = 'Groups')
         RunGroupsScenario()
+    if Ord(through) >= Ord('F') && (scenario = 'All' || scenario = 'Toggles')
+        RunTogglesScenario()
     if Ord(through) >= Ord('F') && (scenario = 'All' || scenario = 'ShortPath')
         RunShortPathScenario()
     if Ord(through) >= Ord('F') && (scenario = 'All' || scenario = 'OpenFolder')
@@ -256,6 +258,221 @@ try {
     }
 }
 ExitApp(exitCode)
+
+; Exercise T6 with real activation, footer clicks, INI and fresh processes.
+; The fixtures specify natural names, different extensions and fixed timestamps.
+RunTogglesScenario() {
+    global testDir, main, testPid, screenshotDirectory, themeName, toggleFailures
+    toggleFailures := 0
+    folder := testDir '\toggles'
+    DirCreate(folder '\sub')
+    DirCreate(folder '\hidden-dir')
+    DirCreate(folder '\system-dir')
+    FileSetAttrib('+H', folder '\hidden-dir')
+    FileSetAttrib('+S', folder '\system-dir')
+    FileAppend('nested', folder '\sub\inner.txt', 'UTF-8')
+    for name in ['a.ini', 'b.txt', 'c.bin', 'hidden.txt', 'system.txt']
+        FileAppend('fixture ' name, folder '\' name, 'UTF-8')
+    FileSetAttrib('+H', folder '\hidden.txt')
+    FileSetAttrib('+S', folder '\system.txt')
+    FileSetTime('20200101000000', folder '\a.ini', 'M')
+    FileSetTime('20220101000000', folder '\b.txt', 'M')
+    FileSetTime('20210101000000', folder '\c.bin', 'M')
+    tree := StartSidebarScenario(folder, 1, testDir '\fixture\a.txt')
+    DllCall('SetWindowPos', 'ptr', main, 'ptr', 0, 'int', 80, 'int', 80, 'int', 1100, 'int', 750, 'uint', 0x14)
+    WaitUntil(() => TreeFind(tree, 'c.bin') != 0, 'Toggles fixture loads')
+    panel := DllCall('GetParent', 'ptr', tree, 'ptr')
+    editor := ControlGetHwnd('Scintilla1', main)
+    title := WinGetTitle(main), text := EditorText(editor)
+    ClickTree(tree, TreeFind(tree, 'c.bin'))
+    ToggleExpect(() => ControlGetText(panel) = 'Binary file; cannot open in the editor', 'binary click displays status hint')
+    ToggleExpect(() => WinGetTitle(main) = title && EditorText(editor) = text && !WinExist('ahk_class #32770 ahk_pid ' testPid), 'binary click retains current file and text')
+    ToggleExpect(() => TreeText(tree, SendMessage(0x110A, 9, 0, tree)) = 'c.bin', 'binary click selects binary row')
+    DismissTogglesDialog()
+    ControlFocus(tree)
+    TreeKey(tree, 0x26)
+    ToggleExpect(() => ControlGetText(panel) = '', 'next sidebar key clears hint')
+    SendMessage(0x110B, 9, TreeFind(tree, 'c.bin'), tree)
+    TreeKey(tree, 0x0D)
+    ToggleExpect(() => ControlGetText(panel) = 'Binary file; cannot open in the editor', 'binary Enter displays status hint')
+    ToggleExpect(() => WinGetTitle(main) = title && EditorText(editor) = text && !WinExist('ahk_class #32770 ahk_pid ' testPid), 'binary Enter retains current file and text')
+    DismissTogglesDialog()
+    filter := ControlGetHwnd('Edit1', panel)
+    ControlSetText('x', filter)
+    ToggleExpect(() => ControlGetText(panel) = '', 'filter text change clears hint')
+    ControlSetText('', filter)
+    ClickTree(tree, TreeFind(tree, 'c.bin'))
+    SettleTogglesHint(panel)
+    SendMessage(0x201, 1, 0, panel)
+    ToggleExpect(() => ControlGetText(panel) = '', 'next sidebar click clears hint')
+    DismissTogglesDialog()
+    SendMessage(0x1102, 2, TreeFind(tree, 'sub'), tree)
+    SendMessage(0x110B, 9, TreeFind(tree, 'b.txt'), tree)
+    ClickFooter(panel, false)
+    ToggleExpect(() => TreeFind(tree, 'hidden.txt') = 0 && TreeFind(tree, 'system.txt') = 0 && TreeFind(tree, 'hidden-dir') = 0 && TreeFind(tree, 'system-dir') = 0, 'hidden and system entries disappear')
+    ToggleExpect(() => ToggleExpanded(tree), 'hidden toggle restores expanded folder')
+    ToggleExpect(() => TreeText(tree, SendMessage(0x110A, 9, 0, tree)) = 'b.txt', 'hidden toggle restores selected file')
+    if screenshotDirectory != '' {
+        HoverFooter(panel, false)
+        CaptureWindow(main, screenshotDirectory '\toggles-hidden-off-' StrLower(themeName) '.png')
+    }
+    FinishSidebarScenario('Toggles hidden off')
+    ini := testDir '\Notepad3.ini'
+    ToggleExpect(() => RegExMatch(ReadSetting(ini, 'SidebarShowHidden', '1'), 'i)^(0|false)$'), 'hidden off INI persists false')
+    tree := RestartToggles()
+    panel := DllCall('GetParent', 'ptr', tree, 'ptr')
+    ToggleExpect(() => TreeFind(tree, 'hidden.txt') = 0 && TreeFind(tree, 'system.txt') = 0 && TreeFind(tree, 'hidden-dir') = 0 && TreeFind(tree, 'system-dir') = 0, 'hidden off survives restart')
+    ClickFooter(panel, false)
+    ToggleExpect(() => TreeFind(tree, 'hidden.txt') != 0 && TreeFind(tree, 'system.txt') != 0 && TreeFind(tree, 'hidden-dir') != 0 && TreeFind(tree, 'system-dir') != 0, 'hidden and system entries reappear')
+    ClickFooter(panel, false)
+    SendMessage(0x1102, 2, TreeFind(tree, 'sub'), tree)
+    SendMessage(0x110B, 9, TreeFind(tree, 'b.txt'), tree)
+    ClickFooter(panel, true)
+    ToggleExpect(() => ToggleOrder(tree) = 'sub|c.bin|a.ini|b.txt', 'extension order folders first then bin ini txt')
+    ToggleExpect(() => ToggleExpanded(tree), 'sort toggle restores expanded folder')
+    ToggleExpect(() => TreeText(tree, SendMessage(0x110A, 9, 0, tree)) = 'b.txt', 'sort toggle restores selected file')
+    FinishSidebarScenario('Toggles extension')
+    ToggleExpect(() => ReadSetting(ini, 'SidebarSortMode', '0') = '1', 'extension INI persists mode 1')
+    tree := RestartToggles()
+    panel := DllCall('GetParent', 'ptr', tree, 'ptr')
+    ToggleExpect(() => ToggleOrder(tree) = 'sub|c.bin|a.ini|b.txt', 'extension order survives restart')
+    ClickFooter(panel, true)
+    ToggleExpect(() => ToggleOrder(tree) = 'sub|b.txt|c.bin|a.ini', 'modified order folders first then 2022 2021 2020')
+    if screenshotDirectory != '' {
+        HoverFooter(panel, true)
+        CaptureWindow(main, screenshotDirectory '\toggles-modified-' StrLower(themeName) '.png')
+    }
+    FinishSidebarScenario('Toggles modified')
+    ToggleExpect(() => ReadSetting(ini, 'SidebarSortMode', '0') = '2', 'modified INI persists mode 2')
+    tree := RestartToggles()
+    panel := DllCall('GetParent', 'ptr', tree, 'ptr')
+    ToggleExpect(() => ToggleOrder(tree) = 'sub|b.txt|c.bin|a.ini', 'modified order survives restart')
+    ClickFooter(panel, true)
+    ToggleExpect(() => ToggleOrder(tree) = 'sub|a.ini|b.txt|c.bin', 'name order returns after third click')
+    ClickFooter(panel, false)
+    FinishSidebarScenario('Toggles defaults')
+    ToggleExpect(() => ReadSetting(ini, 'SidebarSortMode', '0') = '0' && RegExMatch(ReadSetting(ini, 'SidebarShowHidden', '1'), 'i)^(1|true)$'), 'default INI restores name and hidden on')
+    tree := RestartToggles()
+    panel := DllCall('GetParent', 'ptr', tree, 'ptr')
+    ToggleExpect(() => ToggleOrder(tree) = 'hidden-dir|sub|system-dir|a.ini|b.txt|c.bin|hidden.txt|system.txt', 'default settings survive restart')
+    if screenshotDirectory != '' {
+        ; Only the screenshot instance uses GDI so PrintWindow captures the editor.
+        FinishSidebarScenario('Toggles screenshot prepare')
+        content := FileRead(ini, 'UTF-8')
+        FileDelete(ini)
+        FileAppend(StrReplace(content, '[Settings]', '[Settings]`r`nRenderingTechnology=0'), ini, 'UTF-8')
+        tree := RestartToggles()
+        panel := DllCall('GetParent', 'ptr', tree, 'ptr')
+        DragWidth(panel, 650)
+        ClickTree(tree, TreeFind(tree, 'c.bin'))
+        SettleTogglesHint(panel)
+        CaptureWindow(main, screenshotDirectory '\toggles-' StrLower(themeName) '.png')
+    }
+    FinishSidebarScenario('Toggles final')
+    if toggleFailures
+        throw Error('Toggles failed assertions: ' toggleFailures)
+}
+
+; Poll and record independent failures without preventing the remaining baseline
+; checks. The caller fails the scenario after it closes all recorded processes.
+ToggleExpect(condition, name) {
+    global toggleFailures, logFile
+    start := A_TickCount
+    while !condition.Call() && A_TickCount - start < 700
+        Sleep(25)
+    pass := condition.Call()
+    FileAppend((pass ? 'PASS: ' : 'FAIL: ') 'Toggles ' name '`n', logFile)
+    if !pass {
+        toggleFailures += 1
+        FileAppend('DETAIL: ' ToggleState() '`n', logFile)
+    }
+}
+
+; Include live UI and saved settings in failure evidence. This reads only the
+; recorded test process and fixture INI; no private production state is queried.
+ToggleState() {
+    global main, testDir, testPid
+    ini := testDir '\Notepad3.ini'
+    state := 'sort=' ReadSetting(ini, 'SidebarSortMode', '0') ', hidden=' ReadSetting(ini, 'SidebarShowHidden', '1')
+    if main && WinExist(main) {
+        tree := ControlGetHwnd('SysTreeView321', main)
+        panel := DllCall('GetParent', 'ptr', tree, 'ptr')
+        state .= ', title=' WinGetTitle(main) ', hint=' ControlGetText(panel) ', order=' ToggleOrder(tree)
+        if dialog := WinExist('ahk_class #32770 ahk_pid ' testPid)
+            state .= ', dialog=' StrReplace(WinGetText(dialog), '`r`n', ' ')
+    }
+    return state
+}
+
+; A failing old binary path may open a modal question. Cancel only that recorded
+; process's dialog so other independent feature checks can still collect evidence.
+DismissTogglesDialog() {
+    global testPid
+    if dialog := WinExist('ahk_class #32770 ahk_pid ' testPid) {
+        PostMessage(0x111, 2, 0, , dialog)
+        if !WinWaitClose(dialog, , 2)
+            throw Error('Toggles cannot cancel fixture dialog')
+    }
+}
+
+; Settle queued activation before a subsequent clear/capture. This is setup,
+; not a passing assertion when the old implementation has no hint support.
+SettleTogglesHint(panel) {
+    start := A_TickCount
+    while ControlGetText(panel) = '' && A_TickCount - start < 700
+        Sleep(25)
+}
+
+; Read the real direct-child sequence; expected orders remain literal in the test.
+ToggleOrder(tree) {
+    result := '', item := SendMessage(0x110A, 4, FolderGroup(tree), tree)
+    while item {
+        result .= (result = '' ? '' : '|') TreeText(tree, item)
+        item := SendMessage(0x110A, 1, item, tree)
+    }
+    return result
+}
+
+; Refresh invalidates handles. Reacquire the folder and its nested file each time.
+ToggleExpanded(tree) {
+    item := TreeFind(tree, 'sub')
+    return item && (SendMessage(0x1127, item, 0x20, tree) & 0x20) && TreeFind(tree, 'inner.txt', item)
+}
+
+; Target panel-client coordinates. Hidden is clicked only in name mode; sort's
+; right edge stays fixed for all three localized label widths.
+ClickFooter(panel, sort) {
+    ControlGetPos(, , &width, &height, panel)
+    dpi := DllCall('GetDpiForWindow', 'ptr', panel, 'uint')
+    x := width - Round((sort ? 20 : 62) * dpi / 96)
+    y := height - Round(15 * dpi / 96)
+    SendMessage(0x201, 1, x | (y << 16), panel)
+    SendMessage(0x202, 0, x | (y << 16), panel)
+}
+
+; Place only the panel's tracked hover with a client-coordinate message. This
+; captures the footer background without moving the shared desktop pointer.
+HoverFooter(panel, sort) {
+    ControlGetPos(, , &width, &height, panel)
+    dpi := DllCall('GetDpiForWindow', 'ptr', panel, 'uint')
+    x := width - Round((sort ? 20 : 62) * dpi / 96)
+    y := height - Round(15 * dpi / 96)
+    SendMessage(0x200, 0, x | (y << 16), panel)
+}
+
+; Start the persisted configuration without rewriting settings or toggling views.
+RestartToggles() {
+    global testDir, main, testPid, testCreated
+    Run('"' testDir '\Notepad3.exe" /n "' testDir '\fixture\a.txt"', testDir, , &testPid)
+    testCreated := RecordProcess(testPid)
+    main := WinWait('ahk_pid ' testPid, , 10)
+    if !main
+        throw Error('Toggles restart did not create a window')
+    DllCall('SetWindowPos', 'ptr', main, 'ptr', 0, 'int', 80, 'int', 80, 'int', 1100, 'int', 750, 'uint', 0x14)
+    tree := ControlGetHwnd('SysTreeView321', main)
+    WaitUntil(() => TreeFind(tree, 'c.bin') != 0, 'Toggles restart loads fixture')
+    return tree
+}
 
 ; Exercise group persistence through real clicks, normal close and fresh startup.
 ; Added fixtures live only in this runner's directory, after B's exact order check.

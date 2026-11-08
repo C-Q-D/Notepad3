@@ -19,6 +19,7 @@ static HWND s_tooltip = NULL;
 static SidebarDrawing* s_drawing = NULL;
 static UINT s_dpi = 96;
 static int s_hover = 0;
+static WCHAR s_hint[MAX_PATH_EXPLICIT];
 static RECT s_filterRect, s_newRect, s_refreshRect, s_hiddenRect, s_sortRect;
 static int _Sidebar_ClampWidth(int logicalWidth, int clientWidth, UINT dpi);
 static void _Sidebar_UpdateChrome(void);
@@ -34,20 +35,39 @@ typedef struct SidebarPalette {
     COLORREF island, border, text, title, secondary, accent, button, buttonHot;
     COLORREF filter, filterFocus, filterHotBorder, filterFocusBorder, status, divider, textHot;
     COLORREF weak, prefix, folder, ini, source, binary, selected, rowHot;
+    COLORREF hint;
 } SidebarPalette;
 static SidebarPalette const s_darkPalette = {
     RGB(18,20,18), RGB(32,34,32), RGB(201,209,201), RGB(238,243,238), RGB(139,148,158), RGB(126,231,135),
     RGB(27,31,27), RGB(37,43,37), RGB(26,30,26), RGB(21,25,21), RGB(38,48,38), RGB(63,92,65),
     RGB(15,17,15), RGB(27,32,27), RGB(28,32,28),
-    RGB(125,134,125), RGB(63,74,63), RGB(121,192,255), RGB(210,168,255), RGB(255,166,87), RGB(139,148,158), RGB(31,38,31), RGB(24,28,24)
+    RGB(125,134,125), RGB(63,74,63), RGB(121,192,255), RGB(210,168,255), RGB(255,166,87), RGB(139,148,158), RGB(31,38,31), RGB(24,28,24), RGB(0xE6,0xC0,0x7B)
 };
 static SidebarPalette const s_lightPalette = {
     RGB(251,252,251), RGB(226,227,226), RGB(36,41,47), RGB(31,35,40), RGB(87,96,106), RGB(26,127,55),
     RGB(236,238,236), RGB(227,234,227), RGB(236,238,236), RGB(238,242,238), RGB(196,204,196), RGB(26,127,55),
     RGB(239,242,239), RGB(225,229,225), RGB(227,234,227),
-    RGB(110,119,129), RGB(196,204,196), RGB(9,105,218), RGB(130,80,223), RGB(188,76,0), RGB(140,149,159), RGB(227,234,227), RGB(238,242,238)
+    RGB(110,119,129), RGB(196,204,196), RGB(9,105,218), RGB(130,80,223), RGB(188,76,0), RGB(140,149,159), RGB(227,234,227), RGB(238,242,238), RGB(0x9A,0x67,0x00)
 };
 static SidebarPalette const* s_palette = &s_lightPalette;
+
+// Replace the transient footer message on the UI thread. NULL/empty clears it.
+// The panel name exposes the same visible status to assistive technology.
+static void _Sidebar_SetHint(LPCWSTR text)
+{
+    StringCchCopy(s_hint, COUNTOF(s_hint), text ? text : L"");
+    if (s_panel) {
+        SetWindowText(s_panel, s_hint);
+        InvalidateRect(s_panel, NULL, FALSE);
+    }
+}
+
+// Map persisted sort modes to the existing localized footer labels.
+static UINT _Sidebar_SortLabelId(void)
+{
+    return Settings.SidebarSortMode == SIDEBAR_SORT_EXTENSION ? IDS_MUI_SIDEBAR_SORT_EXTENSION :
+           Settings.SidebarSortMode == SIDEBAR_SORT_MODIFIED ? IDS_MUI_SIDEBAR_SORT_MODIFIED : IDS_MUI_SIDEBAR_SORT_NAME;
+}
 
 int Sidebar_GetStrokeWidth(UINT dpi)
 {
@@ -66,6 +86,10 @@ static LRESULT CALLBACK _Sidebar_TreeProc(HWND hwnd, UINT message, WPARAM wParam
 {
     UNREFERENCED_PARAMETER(id);
     UNREFERENCED_PARAMETER(data);
+    if (message == WM_KEYDOWN || message == WM_SYSKEYDOWN || message == WM_LBUTTONDOWN ||
+        message == WM_RBUTTONDOWN || message == WM_MBUTTONDOWN || message == WM_LBUTTONDBLCLK) {
+        if (*s_hint) { _Sidebar_SetHint(NULL); }
+    }
     POINT const point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
     if (message == WM_LBUTTONDOWN) {
         SetFocus(hwnd);
@@ -362,17 +386,19 @@ static int _Sidebar_ClampWidth(int logicalWidth, int clientWidth, UINT dpi)
     return requested < minimum ? minimum : (requested > maximum ? maximum : requested);
 }
 
-// qsort adapter for WIN32_FIND_DATAW entries; names use the tested natural order.
+// qsort adapter: folders first, then the persisted name/extension/newest order.
 static int __cdecl _Sidebar_CompareFindData(const void* left, const void* right)
 {
     WIN32_FIND_DATAW const* a = left;
     WIN32_FIND_DATAW const* b = right;
-    return _Sidebar_CompareEntries((a->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0, a->cFileName,
-                                   (b->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0, b->cFileName);
+    ULONGLONG const modifiedA = ((ULONGLONG)a->ftLastWriteTime.dwHighDateTime << 32) | a->ftLastWriteTime.dwLowDateTime;
+    ULONGLONG const modifiedB = ((ULONGLONG)b->ftLastWriteTime.dwHighDateTime << 32) | b->ftLastWriteTime.dwLowDateTime;
+    return _Sidebar_CompareSortedEntries((a->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0, a->cFileName, modifiedA,
+                                         (b->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0, b->cFileName, modifiedB, Settings.SidebarSortMode);
 }
 
-// Count just one level, stopping at 1000 (displayed as 999+). An inaccessible
-// directory returns -1, which omits the count rather than claiming it is empty.
+// Count one level using the visibility setting, stopping at 1000 (999+). An
+// inaccessible directory returns -1, omitting its count rather than claiming empty.
 static int _Sidebar_CountChildren(const HPATHL folder)
 {
     HPATHL pattern = Path_Copy(folder);
@@ -384,15 +410,16 @@ static int _Sidebar_CountChildren(const HPATHL folder)
     if (search == INVALID_HANDLE_VALUE) { return error == ERROR_FILE_NOT_FOUND ? 0 : -1; }
     int count = 0;
     do {
-        if (wcscmp(data.cFileName, L".") && wcscmp(data.cFileName, L"..")) { ++count; }
+        if (wcscmp(data.cFileName, L".") && wcscmp(data.cFileName, L"..") &&
+            (Settings.SidebarShowHidden || !(data.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)))) { ++count; }
     } while (count < SIDEBAR_COUNT_LIMIT && FindNextFileW(search, &data));
     bool const success = count == SIDEBAR_COUNT_LIMIT || GetLastError() == ERROR_NO_MORE_FILES;
     FindClose(search);
     return success ? count : -1;
 }
 
-// Enumerate the parent's direct entries, then count one level per child directory
-// only when there are at most 256 such directories. No recursive count or paint I/O.
+// Enumerate visible direct entries in the persisted sort order, then count one
+// level per child directory when there are at most 256. No recursion or paint I/O.
 static bool _Sidebar_LoadChildren(HTREEITEM parent)
 {
     HPATHL pattern = _Sidebar_ItemPath(parent);
@@ -411,7 +438,8 @@ static bool _Sidebar_LoadChildren(HTREEITEM parent)
     bool success = true;
     if (search != INVALID_HANDLE_VALUE) {
         do {
-            if (wcscmp(data.cFileName, L".") == 0 || wcscmp(data.cFileName, L"..") == 0) {
+            if (wcscmp(data.cFileName, L".") == 0 || wcscmp(data.cFileName, L"..") == 0 ||
+                (!Settings.SidebarShowHidden && (data.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)))) {
                 continue;
             }
             if (count == capacity) {
@@ -757,10 +785,17 @@ void Sidebar_Refresh(void)
     Path_Release(selected);
 }
 
-// Save before replacing the document. False means cancelled/failed/no load; all
-// paths restore selection to the real document. Calls are guarded across dialogs.
+// Binary targets keep the selected row and report a hint without saving/loading.
+// For text, save before replacement and restore selection to the real document.
+// False means binary/cancelled/failed/no load. Calls are guarded across dialogs.
 static bool _Sidebar_OpenFile(const HPATHL target)
 {
+    if (_Sidebar_IsBinary(Path_FindFileName(target))) {
+        WCHAR hint[MAX_PATH_EXPLICIT];
+        GetLngString(IDS_MUI_SIDEBAR_BINARY, hint, COUNTOF(hint));
+        _Sidebar_SetHint(hint);
+        return false;
+    }
     bool loaded = false;
     SET_FCT_GUARD(false)
     bool const same = Path_IsNotEmpty(Paths.CurrentFile) &&
@@ -1036,7 +1071,12 @@ static void _Sidebar_LayoutChildren(void)
     OffsetRect(&s_newRect, -diameter - _Sidebar_Pixels(6), 0);
     s_filterRect = (RECT){ pad, _Sidebar_Pixels(72), max_i(pad, client.right - pad), _Sidebar_Pixels(106) };
     int const statusTop = max_i(0, client.bottom - _Sidebar_Pixels(30));
-    s_sortRect = (RECT){ client.right - _Sidebar_Pixels(46), statusTop + _Sidebar_Pixels(4), client.right - _Sidebar_Pixels(8), client.bottom - _Sidebar_Pixels(4) };
+    WCHAR sort[128];
+    GetLngString(_Sidebar_SortLabelId(), sort, COUNTOF(sort));
+    HDC const dc = GetDC(s_panel);
+    int const sortWidth = max_i(_Sidebar_Pixels(38), SidebarDrawing_Measure(dc, s_drawing, sort, SidebarFontSmall) + _Sidebar_Pixels(8));
+    ReleaseDC(s_panel, dc);
+    s_sortRect = (RECT){ client.right - _Sidebar_Pixels(8) - sortWidth, statusTop + _Sidebar_Pixels(4), client.right - _Sidebar_Pixels(8), client.bottom - _Sidebar_Pixels(4) };
     s_hiddenRect = s_sortRect;
     OffsetRect(&s_hiddenRect, -_Sidebar_Pixels(30), 0);
     s_hiddenRect.right -= _Sidebar_Pixels(8);
@@ -1057,8 +1097,27 @@ static void _Sidebar_LayoutChildren(void)
         tool.uId = 1;
         tool.rect = (RECT){ _Sidebar_Pixels(12), _Sidebar_Pixels(12), max_i(0, s_newRect.left - _Sidebar_Pixels(6)), _Sidebar_Pixels(62) };
         SendMessage(s_tooltip, TTM_NEWTOOLRECTW, 0, (LPARAM)&tool);
+        tool.uId = 2;
+        tool.rect = s_hiddenRect;
+        SendMessage(s_tooltip, TTM_NEWTOOLRECTW, 0, (LPARAM)&tool);
+        tool.uId = 3;
+        tool.rect = s_sortRect;
+        SendMessage(s_tooltip, TTM_NEWTOOLRECTW, 0, (LPARAM)&tool);
     }
     InvalidateRect(s_panel, NULL, FALSE);
+}
+
+// Handle a footer button at a panel-client point. Reuse refresh so surviving
+// paths retain expansion/selection; existing settings persistence saves the mode.
+// Return false outside both buttons, leaving other panel actions to their owner.
+static bool _Sidebar_ToggleFooter(POINT point)
+{
+    if (PtInRect(&s_hiddenRect, point)) { Settings.SidebarShowHidden = !Settings.SidebarShowHidden; }
+    else if (PtInRect(&s_sortRect, point)) { Settings.SidebarSortMode = (Settings.SidebarSortMode + 1) % 3; }
+    else { return false; }
+    Sidebar_Refresh();
+    _Sidebar_LayoutChildren();
+    return true;
 }
 
 // Root-dependent cue and availability use existing resources. T7 owns matching;
@@ -1102,9 +1161,10 @@ static void _Sidebar_Paint(HDC dc)
     RECT line = { 0, statusTop, client.right, statusTop + strokeWidth };
     SetDCBrushColor(dc, p->divider);
     FillRect(dc, &line, GetStockObject(DC_BRUSH));
-    WCHAR label[128], sort[32];
+    WCHAR label[128], sort[128], hidden[32];
     GetLngString(IDS_MUI_SIDEBAR_LABEL, label, COUNTOF(label));
-    GetLngString(IDS_MUI_SIDEBAR_SORT_NAME, sort, COUNTOF(sort));
+    GetLngString(_Sidebar_SortLabelId(), sort, COUNTOF(sort));
+    GetLngString(IDS_MUI_SIDEBAR_TOGGLE_HIDDEN, hidden, COUNTOF(hidden));
     int const badgeWidth = SidebarDrawing_Measure(dc, s_drawing, label, SidebarFontBold) + _Sidebar_Pixels(26);
     RECT badge = { 0, statusTop + strokeWidth, min_i(badgeWidth, client.right), client.bottom };
     SetDCBrushColor(dc, RGB(126,231,135));
@@ -1113,14 +1173,14 @@ static void _Sidebar_Paint(HDC dc)
     SidebarDrawing_Text(dc, s_drawing, label, SidebarFontBold, badge, RGB(11,12,11));
     if (s_hover == 4) { SidebarDrawing_RoundRect(dc, s_hiddenRect, _Sidebar_Pixels(4), strokeWidth, p->textHot, CLR_INVALID); }
     if (s_hover == 5) { SidebarDrawing_RoundRect(dc, s_sortRect, _Sidebar_Pixels(4), strokeWidth, p->textHot, CLR_INVALID); }
-    SidebarDrawing_Text(dc, s_drawing, L".*", SidebarFontSmall, s_hiddenRect, p->secondary);
+    SidebarDrawing_Text(dc, s_drawing, hidden, SidebarFontSmall, s_hiddenRect, Settings.SidebarShowHidden ? p->accent : p->weak);
     SidebarDrawing_Text(dc, s_drawing, sort, SidebarFontSmall, s_sortRect, p->secondary);
     // Empty path handles can own a NULL buffer during startup, before FileLoad.
     LPCWSTR current = Path_IsNotEmpty(Paths.CurrentFile) ? Path_Get(Paths.CurrentFile) : L"";
     LPCWSTR const relative = Path_IsNotEmpty(Settings.SidebarFolder) ? _Sidebar_RelativePath(Path_Get(Settings.SidebarFolder), current) : NULL;
     if (relative) { current = relative; }
     RECT pathRect = { badgeWidth + _Sidebar_Pixels(8), statusTop, s_hiddenRect.left - _Sidebar_Pixels(8), client.bottom };
-    SidebarDrawing_Text(dc, s_drawing, current, SidebarFontSmall, pathRect, p->secondary);
+    SidebarDrawing_Text(dc, s_drawing, *s_hint ? s_hint : current, SidebarFontSmall, pathRect, *s_hint ? p->hint : p->secondary);
     RestoreDC(dc, saved);
 
     SidebarDrawing_RoundRect(dc, client, _Sidebar_Pixels(16), strokeWidth, CLR_INVALID, p->border);
@@ -1195,11 +1255,19 @@ static LRESULT CALLBACK _Sidebar_PanelProc(HWND hwnd, UINT message, WPARAM wPara
         return 0;
     case WM_NOTIFY:
         if (((NMHDR*)lParam)->hwndFrom == s_tooltip && ((NMHDR*)lParam)->code == TTN_GETDISPINFOW) {
-            ((NMTTDISPINFOW*)lParam)->lpszText = (LPWSTR)(Path_IsNotEmpty(Settings.SidebarFolder) ? Path_Get(Settings.SidebarFolder) : L"");
+            NMTTDISPINFOW* info = (NMTTDISPINFOW*)lParam;
+            static WCHAR tip[256];
+            if (info->hdr.idFrom == 2 || info->hdr.idFrom == 3) {
+                GetLngString(info->hdr.idFrom == 2 ? IDS_MUI_SIDEBAR_HIDDEN_HINT : IDS_MUI_SIDEBAR_SORT_HINT, tip, COUNTOF(tip));
+                info->lpszText = tip;
+            } else {
+                info->lpszText = (LPWSTR)(Path_IsNotEmpty(Settings.SidebarFolder) ? Path_Get(Settings.SidebarFolder) : L"");
+            }
             return 0;
         }
         return _Sidebar_OnNotify((NMHDR*)lParam);
     case WM_COMMAND:
+        if ((HWND)lParam == s_filter && HIWORD(wParam) == EN_CHANGE && *s_hint) { _Sidebar_SetHint(NULL); }
         if ((HWND)lParam == s_filter && (HIWORD(wParam) == EN_SETFOCUS || HIWORD(wParam) == EN_KILLFOCUS)) {
             InvalidateRect(hwnd, &s_filterRect, FALSE);
             InvalidateRect(s_filter, NULL, TRUE);
@@ -1228,8 +1296,16 @@ static LRESULT CALLBACK _Sidebar_PanelProc(HWND hwnd, UINT message, WPARAM wPara
         s_hover = 0;
         InvalidateRect(hwnd, NULL, FALSE);
         return 0;
+    case WM_KEYDOWN:
+    case WM_SYSKEYDOWN:
+    case WM_RBUTTONDOWN:
+    case WM_MBUTTONDOWN:
+        if (*s_hint) { _Sidebar_SetHint(NULL); }
+        break;
     case WM_LBUTTONDOWN: {
+        if (*s_hint) { _Sidebar_SetHint(NULL); }
         POINT const point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        if (_Sidebar_ToggleFooter(point)) { return 0; }
         if (PtInRect(&s_filterRect, point) && IsWindowEnabled(s_filter)) { SetFocus(s_filter); }
         return 0;
     }
@@ -1248,6 +1324,10 @@ static LRESULT CALLBACK _Sidebar_FilterProc(HWND hwnd, UINT message, WPARAM wPar
 {
     UNREFERENCED_PARAMETER(id);
     UNREFERENCED_PARAMETER(data);
+    if (message == WM_KEYDOWN || message == WM_SYSKEYDOWN || message == WM_LBUTTONDOWN ||
+        message == WM_RBUTTONDOWN || message == WM_MBUTTONDOWN || message == WM_LBUTTONDBLCLK) {
+        if (*s_hint) { _Sidebar_SetHint(NULL); }
+    }
     if (message == WM_MOUSEMOVE) {
         if (s_hover != 3) { s_hover = 3; InvalidateRect(s_panel, &s_filterRect, FALSE); }
         TRACKMOUSEEVENT tracking = { sizeof(tracking), TME_LEAVE, hwnd, 0 };
@@ -1302,10 +1382,13 @@ bool Sidebar_Create(HWND parent)
     tool.hwnd = s_panel;
     tool.uId = 1;
     tool.lpszText = LPSTR_TEXTCALLBACKW;
-    if (!SendMessage(s_tooltip, TTM_ADDTOOLW, 0, (LPARAM)&tool)) {
-        DestroyWindow(s_panel);
-        DestroyWindow(s_splitter);
-        return false;
+    for (UINT_PTR id = 1; id <= 3; ++id) {
+        tool.uId = id;
+        if (!SendMessage(s_tooltip, TTM_ADDTOOLW, 0, (LPARAM)&tool)) {
+            DestroyWindow(s_panel);
+            DestroyWindow(s_splitter);
+            return false;
+        }
     }
     SendMessage(s_tooltip, TTM_SETMAXTIPWIDTH, 0, _Sidebar_Pixels(600));
     // InitTreeView owns subclass data until destruction; installing it again leaks it.
@@ -1322,6 +1405,11 @@ bool Sidebar_Create(HWND parent)
 
 bool Sidebar_PreTranslateMessage(MSG* message)
 {
+    // Consumed Enter/F5 never reach the subclasses, so clear before dispatch too.
+    if (*s_hint && (message->hwnd == s_panel || IsChild(s_panel, message->hwnd)) &&
+        (message->message == WM_KEYDOWN || message->message == WM_SYSKEYDOWN)) {
+        _Sidebar_SetHint(NULL);
+    }
     if (message->hwnd == s_filter && message->message >= WM_KEYFIRST && message->message <= WM_KEYLAST &&
         GetKeyState(VK_MENU) >= 0) {
         bool const control = GetKeyState(VK_CONTROL) < 0;
