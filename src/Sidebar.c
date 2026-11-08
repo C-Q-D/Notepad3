@@ -62,6 +62,35 @@ static void _Sidebar_SetHint(LPCWSTR text)
     }
 }
 
+// Clear transient status on the next key or button press, including native
+// scrollbar/non-client input. Callers still dispatch the message normally so
+// scrolling, focus and control-specific mouse behavior remain owned by Windows.
+static void _Sidebar_ClearHintForInput(UINT message)
+{
+    switch (message) {
+    case WM_KEYDOWN:
+    case WM_SYSKEYDOWN:
+    case WM_LBUTTONDOWN:
+    case WM_RBUTTONDOWN:
+    case WM_MBUTTONDOWN:
+    case WM_XBUTTONDOWN:
+    case WM_LBUTTONDBLCLK:
+    case WM_RBUTTONDBLCLK:
+    case WM_MBUTTONDBLCLK:
+    case WM_XBUTTONDBLCLK:
+    case WM_NCLBUTTONDOWN:
+    case WM_NCRBUTTONDOWN:
+    case WM_NCMBUTTONDOWN:
+    case WM_NCXBUTTONDOWN:
+    case WM_NCLBUTTONDBLCLK:
+    case WM_NCRBUTTONDBLCLK:
+    case WM_NCMBUTTONDBLCLK:
+    case WM_NCXBUTTONDBLCLK:
+        if (*s_hint) { _Sidebar_SetHint(NULL); }
+        break;
+    }
+}
+
 // Map persisted sort modes to the existing localized footer labels.
 static UINT _Sidebar_SortLabelId(void)
 {
@@ -86,10 +115,7 @@ static LRESULT CALLBACK _Sidebar_TreeProc(HWND hwnd, UINT message, WPARAM wParam
 {
     UNREFERENCED_PARAMETER(id);
     UNREFERENCED_PARAMETER(data);
-    if (message == WM_KEYDOWN || message == WM_SYSKEYDOWN || message == WM_LBUTTONDOWN ||
-        message == WM_RBUTTONDOWN || message == WM_MBUTTONDOWN || message == WM_LBUTTONDBLCLK) {
-        if (*s_hint) { _Sidebar_SetHint(NULL); }
-    }
+    _Sidebar_ClearHintForInput(message);
     POINT const point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
     if (message == WM_LBUTTONDOWN) {
         SetFocus(hwnd);
@@ -844,14 +870,20 @@ static HTREEITEM _Sidebar_RowAt(POINT point)
     return NULL;
 }
 
-// The hover action occupies the right edge of the group row, measured with the
-// same font used to draw it; this remains a real mouse hit zone at any DPI.
+// Keep the hover action after the group title at every width/DPI. Return empty
+// bounds when it cannot fit, so an invisible action never intercepts title clicks.
+// Drawing and activation share these exact bounds.
 static RECT _Sidebar_CollapseRect(HDC dc, RECT row)
 {
-    WCHAR text[128];
+    WCHAR text[128], name[128], title[256];
     GetLngString(IDS_MUI_SIDEBAR_COLLAPSE_ALL, text, COUNTOF(text));
+    GetLngString(IDS_MUI_SIDEBAR_FOLDERS_TITLE, name, COUNTOF(name));
+    bool const expanded = (TreeView_GetItemState(s_tree, s_folders, TVIS_EXPANDED) & TVIS_EXPANDED) != 0;
+    StringCchPrintf(title, COUNTOF(title), L"%s  %s", name, expanded ? L"\x2212" : L"+");
+    int const titleEnd = row.left + _Sidebar_Pixels(10) + SidebarDrawing_Measure(dc, s_drawing, title, SidebarFontSmall) + _Sidebar_Pixels(8);
     row.right -= _Sidebar_Pixels(10);
-    row.left = max_i(_Sidebar_Pixels(10), row.right - SidebarDrawing_Measure(dc, s_drawing, text, SidebarFontSmall));
+    row.left = max_i(titleEnd, row.right - SidebarDrawing_Measure(dc, s_drawing, text, SidebarFontSmall));
+    if (row.left > row.right) { row.left = row.right; }
     return row;
 }
 
@@ -950,8 +982,11 @@ static void _Sidebar_DrawRow(NMTVCUSTOMDRAW* draw)
                 GetLngString(IDS_MUI_SIDEBAR_COUNTS, format, COUNTOF(format));
                 StringCchPrintf(right, COUNTOF(right), format, s_rootDirectories, s_rootFiles);
             }
-            int const titleWidth = SidebarDrawing_Measure(dc, s_drawing, title, SidebarFontSmall);
-            text.left = max_i(text.left + titleWidth + _Sidebar_Pixels(8), text.right - SidebarDrawing_Measure(dc, s_drawing, right, SidebarFontSmall));
+            if (item == s_hotItem) { text = _Sidebar_CollapseRect(dc, row); }
+            else {
+                int const titleWidth = SidebarDrawing_Measure(dc, s_drawing, title, SidebarFontSmall);
+                text.left = max_i(text.left + titleWidth + _Sidebar_Pixels(8), text.right - SidebarDrawing_Measure(dc, s_drawing, right, SidebarFontSmall));
+            }
             SidebarDrawing_Text(dc, s_drawing, right, SidebarFontSmall, text, item == s_hotItem ? p->accent : p->weak);
         }
     } else {
@@ -1077,9 +1112,9 @@ static void _Sidebar_LayoutChildren(void)
     int const sortWidth = max_i(_Sidebar_Pixels(38), SidebarDrawing_Measure(dc, s_drawing, sort, SidebarFontSmall) + _Sidebar_Pixels(8));
     ReleaseDC(s_panel, dc);
     s_sortRect = (RECT){ client.right - _Sidebar_Pixels(8) - sortWidth, statusTop + _Sidebar_Pixels(4), client.right - _Sidebar_Pixels(8), client.bottom - _Sidebar_Pixels(4) };
-    s_hiddenRect = s_sortRect;
-    OffsetRect(&s_hiddenRect, -_Sidebar_Pixels(30), 0);
-    s_hiddenRect.right -= _Sidebar_Pixels(8);
+    // Hidden has a fixed width before the variable sort label. The same bounds
+    // serve painting, hover, tooltips and clicks; adjacent edges never overlap.
+    s_hiddenRect = (RECT){ s_sortRect.left - _Sidebar_Pixels(30), s_sortRect.top, s_sortRect.left, s_sortRect.bottom };
     if (s_filter) {
         int const editLeft = s_filterRect.left + _Sidebar_Pixels(32);
         int const editHeight = max_i(0, min_i(_Sidebar_Pixels(22), statusTop - _Sidebar_Pixels(78)));
@@ -1224,6 +1259,7 @@ static void _Sidebar_Paint(HDC dc)
 // editor notification guard. Resource release occurs after child destruction.
 static LRESULT CALLBACK _Sidebar_PanelProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
+    _Sidebar_ClearHintForInput(message);
     switch (message) {
     case WM_ERASEBKGND:
         return TRUE;
@@ -1296,14 +1332,7 @@ static LRESULT CALLBACK _Sidebar_PanelProc(HWND hwnd, UINT message, WPARAM wPara
         s_hover = 0;
         InvalidateRect(hwnd, NULL, FALSE);
         return 0;
-    case WM_KEYDOWN:
-    case WM_SYSKEYDOWN:
-    case WM_RBUTTONDOWN:
-    case WM_MBUTTONDOWN:
-        if (*s_hint) { _Sidebar_SetHint(NULL); }
-        break;
     case WM_LBUTTONDOWN: {
-        if (*s_hint) { _Sidebar_SetHint(NULL); }
         POINT const point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         if (_Sidebar_ToggleFooter(point)) { return 0; }
         if (PtInRect(&s_filterRect, point) && IsWindowEnabled(s_filter)) { SetFocus(s_filter); }
@@ -1324,10 +1353,7 @@ static LRESULT CALLBACK _Sidebar_FilterProc(HWND hwnd, UINT message, WPARAM wPar
 {
     UNREFERENCED_PARAMETER(id);
     UNREFERENCED_PARAMETER(data);
-    if (message == WM_KEYDOWN || message == WM_SYSKEYDOWN || message == WM_LBUTTONDOWN ||
-        message == WM_RBUTTONDOWN || message == WM_MBUTTONDOWN || message == WM_LBUTTONDBLCLK) {
-        if (*s_hint) { _Sidebar_SetHint(NULL); }
-    }
+    _Sidebar_ClearHintForInput(message);
     if (message == WM_MOUSEMOVE) {
         if (s_hover != 3) { s_hover = 3; InvalidateRect(s_panel, &s_filterRect, FALSE); }
         TRACKMOUSEEVENT tracking = { sizeof(tracking), TME_LEAVE, hwnd, 0 };
@@ -1406,9 +1432,8 @@ bool Sidebar_Create(HWND parent)
 bool Sidebar_PreTranslateMessage(MSG* message)
 {
     // Consumed Enter/F5 never reach the subclasses, so clear before dispatch too.
-    if (*s_hint && (message->hwnd == s_panel || IsChild(s_panel, message->hwnd)) &&
-        (message->message == WM_KEYDOWN || message->message == WM_SYSKEYDOWN)) {
-        _Sidebar_SetHint(NULL);
+    if (message->hwnd == s_panel || IsChild(s_panel, message->hwnd)) {
+        _Sidebar_ClearHintForInput(message->message);
     }
     if (message->hwnd == s_filter && message->message >= WM_KEYFIRST && message->message <= WM_KEYLAST &&
         GetKeyState(VK_MENU) >= 0) {

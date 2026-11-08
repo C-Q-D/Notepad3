@@ -369,8 +369,88 @@ RunTogglesScenario() {
         CaptureWindow(main, screenshotDirectory '\toggles-' StrLower(themeName) '.png')
     }
     FinishSidebarScenario('Toggles final')
+    RunTogglesReworkScenario(folder)
     if toggleFailures
         throw Error('Toggles failed assertions: ' toggleFailures)
+}
+
+; Reproduce the reviewed long-label overlap at its visible left/middle glyphs,
+; then exercise actual native scrollbar clicks. Each footer case gets a fresh INI.
+RunTogglesReworkScenario(folder) {
+    global testDir, main, screenshotDirectory, themeName, logFile
+    expected := 'hidden-dir|sub|system-dir|a.ini|b.txt|c.bin|hidden.txt|system.txt'
+    for position in ['left', 'middle'] {
+        tree := StartSidebarScenario(folder, 1, testDir '\fixture\a.txt')
+        DllCall('SetWindowPos', 'ptr', main, 'ptr', 0, 'int', 80, 'int', 80, 'int', 1100, 'int', 750, 'uint', 0x14)
+        WaitUntil(() => TreeFind(tree, 'c.bin') != 0, 'Toggles long sort fixture loads')
+        panel := DllCall('GetParent', 'ptr', tree, 'ptr')
+        ClickFooter(panel, true)
+        ClickFooter(panel, true)
+        ; English New→Old has visible left and middle glyphs at these positions.
+        ; Neither target is the right-edge point covered by the original scenario.
+        ControlGetPos(, , &width, &height, panel)
+        dpi := DllCall('GetDpiForWindow', 'ptr', panel, 'uint')
+        x := width - Round((position = 'left' ? 60 : 35) * dpi / 96)
+        y := height - Round(15 * dpi / 96)
+        point := x | (y << 16)
+        SendMessage(0x200, 0, point, panel)
+        if screenshotDirectory != '' && position = 'left'
+            CaptureWindow(main, screenshotDirectory '\rework-long-label-' StrLower(themeName) '.png')
+        SendMessage(0x201, 1, point, panel)
+        SendMessage(0x202, 0, point, panel)
+        ToggleExpect(() => ToggleOrder(tree) = expected, 'long sort ' position ' cycles to name')
+        ToggleExpect(() => TreeFind(tree, 'hidden.txt') != 0 && TreeFind(tree, 'system.txt') != 0 && TreeFind(tree, 'hidden-dir') != 0 && TreeFind(tree, 'system-dir') != 0, 'long sort ' position ' keeps hidden entries')
+        FinishSidebarScenario('Toggles long sort ' position)
+        ini := testDir '\Notepad3.ini'
+        ToggleExpect(() => ReadSetting(ini, 'SidebarSortMode', '0') = '0' && RegExMatch(ReadSetting(ini, 'SidebarShowHidden', '1'), 'i)^(1|true)$'), 'long sort ' position ' saves only sort change')
+    }
+    Loop 80
+        FileAppend('scroll fixture', folder '\z' Format('{:02}', A_Index) '.txt', 'UTF-8')
+    tree := StartSidebarScenario(folder, 1, testDir '\fixture\a.txt')
+    DllCall('SetWindowPos', 'ptr', main, 'ptr', 0, 'int', 80, 'int', 80, 'int', 1100, 'int', 750, 'uint', 0x14)
+    WaitUntil(() => TreeFind(tree, 'z80.txt') != 0, 'Toggles scrolling fixture loads')
+    panel := DllCall('GetParent', 'ptr', tree, 'ptr')
+    for part in ['arrow', 'track', 'thumb'] {
+        ClickTree(tree, TreeFind(tree, 'c.bin'))
+        WaitUntil(() => ControlGetText(panel) = 'Binary file; cannot open in the editor', 'Toggles scrollbar ' part ' hint setup')
+        before := DllCall('GetScrollPos', 'ptr', tree, 'int', 1, 'int')
+        ClickTreeScrollBar(tree, part)
+        if part = 'thumb'
+            ToggleExpect(() => ControlGetText(panel) = '', 'scrollbar thumb click clears hint')
+        else
+            ToggleExpect(() => ControlGetText(panel) = '' && DllCall('GetScrollPos', 'ptr', tree, 'int', 1, 'int') > before, 'scrollbar ' part ' click clears hint and scrolls')
+        FileAppend('INFO: scrollbar ' part ' before=' before ' after=' DllCall('GetScrollPos', 'ptr', tree, 'int', 1, 'int') '`n', logFile)
+    }
+    if screenshotDirectory != ''
+        CaptureWindow(main, screenshotDirectory '\rework-scroll-cleared-' StrLower(themeName) '.png')
+    SendMessage(0x1102, 2, TreeFind(tree, 'sub'), tree)
+    DragWidth(panel, 100)
+    ClickTree(tree, FolderGroup(tree))
+    ToggleExpect(() => !(SendMessage(0x1127, FolderGroup(tree), 0x20, tree) & 0x20), 'narrow group title collapses group instead of hidden action')
+    FinishSidebarScenario('Toggles rework')
+}
+
+; Get the OS scrollbar geometry and post a real non-client press/release to its
+; down arrow, lower page track or thumb. No WM_VSCROLL substitutes the default path.
+ClickTreeScrollBar(tree, part) {
+    info := Buffer(60, 0)
+    NumPut('uint', 60, info)
+    if !DllCall('GetScrollBarInfo', 'ptr', tree, 'int', -5, 'ptr', info) || (NumGet(info, 36, 'uint') & 0x8000)
+        throw Error('Toggles native vertical scrollbar is unavailable')
+    left := NumGet(info, 4, 'int'), top := NumGet(info, 8, 'int')
+    right := NumGet(info, 12, 'int'), bottom := NumGet(info, 16, 'int')
+    arrow := NumGet(info, 20, 'int')
+    thumbTop := top + NumGet(info, 24, 'int'), thumbBottom := top + NumGet(info, 28, 'int')
+    x := (left + right) // 2
+    y := part = 'arrow' ? bottom - arrow // 2 : part = 'track' ? (thumbBottom + bottom - arrow) // 2 : (thumbTop + thumbBottom) // 2
+    screenPoint := (x & 0xffff) | ((y & 0xffff) << 16)
+    client := Buffer(8, 0)
+    NumPut('int', x, 'int', y, client)
+    DllCall('ScreenToClient', 'ptr', tree, 'ptr', client)
+    clientPoint := (NumGet(client, 0, 'int') & 0xffff) | ((NumGet(client, 4, 'int') & 0xffff) << 16)
+    PostMessage(0xA1, 7, screenPoint, tree)
+    PostMessage(0x202, 0, clientPoint, tree)
+    PostMessage(0xA2, 7, screenPoint, tree)
 }
 
 ; Poll and record independent failures without preventing the remaining baseline
