@@ -38,8 +38,7 @@ try {
     Check(Abs(tw - 300 * dpi / 96) <= 4, 'A dragging restores requested width')
     PostMessage(0x111, 41066, 0, , main)
     WaitUntil(() => !DllCall('IsWindowVisible', 'ptr', tree), 'A hide command hides tree')
-    ControlGetPos(&ex, , , , editor)
-    Check(ex <= 4, 'A hidden sidebar restores editor left edge (actual ' ex ')')
+    WaitUntil(() => ControlLeft(editor) <= 4, 'A hidden sidebar restores editor left edge')
     PostMessage(0x111, 41066, 0, , main)
     WaitUntil(() => DllCall('IsWindowVisible', 'ptr', tree), 'A show command restores tree')
     if Ord(through) >= Ord('B') {
@@ -65,7 +64,7 @@ try {
         WaitUntil(() => TreeText(tree, SendMessage(0x110A, 4, child, tree)) = 'inner.txt', 'B re-expanding sub reloads contents')
         Loop 3
             SendMessage(0x31A, 0, 0, , main)
-        Check(TreeText(tree, SendMessage(0x110A, 9, 0, tree)) = 'a.txt', 'B theme updates preserve current-file selection')
+        WaitUntil(() => TreeText(tree, SendMessage(0x110A, 9, 0, tree)) = 'a.txt', 'B theme updates preserve current-file selection')
     }
     if screenshotDirectory != '' {
         CaptureWindow(main, screenshotDirectory '\sidebar-' StrLower(themeName) '.png')
@@ -82,7 +81,7 @@ try {
         }
         Check(true, 'C no save prompt within two seconds')
         Check(InStr(FileRead(testDir '\fixture\a.txt', 'UTF-8'), 'XYZ'), 'C a.txt saved silently before switch')
-        Check(InStr(WinGetTitle(main), 'b2.txt'), 'C b2.txt opened')
+        WaitUntil(() => InStr(WinGetTitle(main), 'b2.txt') != 0, 'C b2.txt opened')
     }
     if Ord(through) >= Ord('D') && (scenario = 'All' || scenario = 'D') {
         PostMessage(0x111, 40000, 0, , main)
@@ -97,9 +96,9 @@ try {
         Check(dialog != 0, 'D switching modified untitled document prompts')
         PostMessage(0x111, 2, 0, , dialog)
         Check(WinWaitClose(dialog, , 2), 'D Cancel closes save question')
-        Check(WinGetTitle(main) = beforeTitle, 'D Cancel retains untitled title')
-        Check(EditorText(editor) = beforeText, 'D Cancel retains editor text')
-        Check(SendMessage(0x110A, 9, 0, tree) = 0, 'D Cancel clears tree selection for untitled document')
+        WaitUntil(() => WinGetTitle(main) = beforeTitle, 'D Cancel retains untitled title')
+        WaitUntil(() => EditorText(editor) = beforeText, 'D Cancel retains editor text')
+        WaitUntil(() => SendMessage(0x110A, 9, 0, tree) = 0, 'D Cancel clears tree selection for untitled document')
     }
     if Ord(through) >= Ord('E') && (scenario = 'All' || scenario = 'E') {
         ; Create the read-only fixture only after B's exact four-entry assertion.
@@ -124,8 +123,9 @@ try {
         Check(InStr(WinGetText(dialog), 'different file'), 'E prompt offers saving to a different file')
         PostMessage(0x111, 7, 0, , dialog)
         Check(WinWaitClose(dialog, , 2), 'E No closes read-only prompt')
-        Check(InStr(WinGetTitle(main), 'ro.txt'), 'E No keeps ro.txt open')
-        Check(TreeText(tree, SendMessage(0x110A, 9, 0, tree)) = 'ro.txt', 'E No restores real current-file selection')
+        WaitUntil(() => InStr(WinGetTitle(main), 'ro.txt') != 0, 'E No keeps ro.txt open')
+        ; Destroying the prompt precedes the caller's current-file synchronization.
+        WaitUntil(() => TreeText(tree, SendMessage(0x110A, 9, 0, tree)) = 'ro.txt', 'E No restores real current-file selection')
     }
     if Ord(through) >= Ord('F') && (scenario = 'All' || scenario = 'F') {
         SendMessage(2014, 0, 0, editor)
@@ -152,9 +152,9 @@ try {
         Check(true, 'F F5 does not invoke file revert prompt')
         Check(EditorText(editor) = beforeText, 'F F5 preserves unsaved editor text')
         Check(TreeFind(tree, 'a.txt') != 0 && TreeFind(tree, 'b2.txt') != 0 && TreeFind(tree, 'b10.txt') != 0, 'F F5 retains original tree entries')
-        Check(TreeText(tree, SendMessage(0x110A, 9, 0, tree)) = 'b2.txt', 'F F5 restores selection')
+        WaitUntil(() => TreeText(tree, SendMessage(0x110A, 9, 0, tree)) = 'b2.txt', 'F F5 restores selection')
         subItem := TreeFind(tree, 'sub')
-        Check((SendMessage(0x1127, subItem, 0x20, tree) & 0x20) != 0 && TreeText(tree, SendMessage(0x110A, 4, subItem, tree)) = 'inner.txt', 'F F5 restores expanded directory')
+        WaitUntil(() => (SendMessage(0x1127, subItem, 0x20, tree) & 0x20) != 0 && TreeText(tree, SendMessage(0x110A, 4, subItem, tree)) = 'inner.txt', 'F F5 restores expanded directory')
         SendMessage(0x110B, 9, subItem, tree)
         ControlFocus(tree)
         TreeKey(tree, 0x0D)
@@ -195,8 +195,12 @@ try {
         ClickTree(tree, longItem)
         WaitUntil(() => InStr(WinGetTitle(main), 'long.txt') != 0, 'LongPath file opens')
         WaitUntil(() => TreeText(tree, SendMessage(0x110A, 9, 0, tree)) = 'long.txt', 'LongPath current file remains selected')
+        FileAppend('refresh completed', '\\?\' longDir '\refresh-long.txt', 'UTF-8')
         ControlFocus(tree)
         TreeKey(tree, 0x74)
+        ; A pre-refresh selection already matches. A newly created child proves
+        ; the posted F5 has actually rebuilt the tree before checking restoration.
+        WaitUntil(() => LongPathRefreshItem(tree, segment) != 0, 'LongPath F5 enumerates newly created child')
         WaitUntil(() => TreeText(tree, SendMessage(0x110A, 9, 0, tree)) = 'long.txt', 'LongPath F5 restores selected file')
         longParent := TreeFind(tree, 'long-path')
         Loop 3 {
@@ -215,14 +219,11 @@ try {
     visible := ReadSetting(ini, 'ShowSidebar')
     Check(visible = '1' || visible = 'true', 'A visibility persisted')
     Check(ReadSetting(ini, 'SidebarWidth') = '300', 'A width persisted')
-    folder := ReadSetting(ini, 'SidebarFolder')
-    expanded := Buffer(65536, 0)
-    DllCall('ExpandEnvironmentStringsW', 'str', folder, 'ptr', expanded, 'uint', 32768)
-    folder := StrGet(expanded)
-    full := Buffer(65536, 0)
-    DllCall('GetFullPathNameW', 'str', testDir '\' folder, 'uint', 32768, 'ptr', full, 'ptr', 0)
-    ; Absolute and relative paths are both valid under the application's path policy.
-    Check(StrLower(folder) = StrLower(testDir '\fixture') || StrLower(StrGet(full)) = StrLower(testDir '\fixture'), 'A folder persisted')
+    Check(StrLower(PersistedSidebarFolder()) = StrLower(testDir '\fixture'), 'A folder persisted')
+    if Ord(through) >= Ord('F') && (scenario = 'All' || scenario = 'ShortPath')
+        RunShortPathScenario()
+    if Ord(through) >= Ord('F') && (scenario = 'All' || scenario = 'OpenFolder')
+        RunOpenFolderScenario()
 } catch Error as err {
     FileAppend('FAIL: ' err.Message '`n', logFile)
     exitCode := 1
@@ -233,6 +234,154 @@ try {
     }
 }
 ExitApp(exitCode)
+
+; Resolve the deep refresh marker using fresh tree handles on every poll, since
+; F5 invalidates the prior generation's item handles while rebuilding the tree.
+LongPathRefreshItem(tree, segment) {
+    parent := TreeFind(tree, 'long-path')
+    Loop 3 {
+        if !parent
+            return 0
+        parent := TreeFind(tree, segment, parent)
+    }
+    return parent ? TreeFind(tree, 'refresh-long.txt', parent) : 0
+}
+
+; Start a fresh, recorded instance with explicit sidebar settings, without repairing
+; its tree through a visibility toggle. folder may be empty or an 8.3 alias;
+; visible is 0/1 and file is an existing absolute path opened without editing.
+; Return the tree handle; failed startup/assertions throw to the owner's cleanup.
+StartSidebarScenario(folder, visible, file) {
+    global testDir, testPid, testCreated, main, themeName
+    ini := testDir '\Notepad3.ini'
+    FileDelete(ini)
+    FileAppend('[Settings]`r`nSettingsVersion=5`r`nSaveSettings=1`r`nSaveRecentFiles=0`r`n'
+        'ShowSidebar=' visible '`r`nSidebarWidth=300`r`nSidebarFolder=' folder '`r`n'
+        'ReuseWindow=0`r`nSingleFileInstance=0`r`nWinThemeDarkMode=' (themeName = 'Dark' ? 1 : 2)
+        '`r`n[Settings2]`r`nPreferredLanguageLocaleName=en-US`r`n', ini, 'UTF-8')
+    Run('"' testDir '\Notepad3.exe" /n "' file '"', testDir, , &testPid)
+    testCreated := RecordProcess(testPid)
+    main := WinWait('ahk_pid ' testPid, , 10)
+    Check(main != 0, 'scenario instance starts')
+    return ControlGetHwnd('SysTreeView321', main)
+}
+
+; Wait for both window and process exit so the next instance sees saved settings.
+FinishSidebarScenario(label) {
+    global main, testPid
+    CloseTestWindow(main)
+    Check(WinWaitClose(main, , 5), label ' normal close completes')
+    WaitUntil(() => !ProcessExist(testPid), label ' process exits after settings save', 5000)
+    main := 0
+}
+
+; Exercise the public root entry with an actual filesystem-provided 8.3 alias.
+; An unavailable alias is reported as a skip, never as a passing regression.
+RunShortPathScenario() {
+    global testDir, main, logFile
+    folder := testDir '\Long Named Sidebar Folder'
+    DirCreate(folder)
+    FileAppend('short-root first', folder '\a.txt', 'UTF-8')
+    FileAppend('short-root second', folder '\b.txt', 'UTF-8')
+    shortBuffer := Buffer(65536, 0)
+    length := DllCall('GetShortPathNameW', 'str', folder, 'ptr', shortBuffer, 'uint', 32768, 'uint')
+    shortFolder := length && length < 32768 ? StrGet(shortBuffer) : ''
+    if shortFolder = '' || StrLower(shortFolder) = StrLower(folder) {
+        FileAppend('SKIP: ShortPath filesystem supplied no distinct 8.3 alias (8.3 name generation may be disabled)`n', logFile)
+        ; Existing aliases can still reproduce the bug when new 8.3 names are
+        ; disabled. Use the installed runner's directory strictly for reading.
+        folder := RegExReplace(A_AhkPath, '\\v2\\[^\\]+$', '')
+        length := DllCall('GetShortPathNameW', 'str', folder, 'ptr', shortBuffer, 'uint', 32768, 'uint')
+        shortFolder := length && length < 32768 ? StrGet(shortBuffer) : ''
+        if shortFolder = '' || StrLower(shortFolder) = StrLower(folder) || !FileExist(folder '\license.txt') || !FileExist(folder '\WindowSpy.ahk') {
+            FileAppend('SKIP: ShortPath no existing runner-directory alias with readable fixture files`n', logFile)
+            return
+        }
+        firstFile := 'license.txt', secondFile := 'WindowSpy.ahk'
+        FileAppend('INFO: ShortPath uses existing read-only runner directory alias ' shortFolder '`n', logFile)
+    } else {
+        firstFile := 'a.txt', secondFile := 'b.txt'
+    }
+    Check(true, 'ShortPath filesystem provides a distinct 8.3 root alias')
+    tree := StartSidebarScenario(shortFolder, 1, folder '\' firstFile)
+    WaitUntil(() => SendMessage(0x110A, 0, 0, tree) != 0, 'ShortPath startup root exists before any toggle')
+    WaitUntil(() => TreeText(tree, SendMessage(0x110A, 9, 0, tree)) = firstFile, 'ShortPath startup selects long-name current file')
+    SplitPath(folder, &folderName)
+    Check(TreeText(tree, SendMessage(0x110A, 0, 0, tree)) = folderName, 'ShortPath root uses expanded long name')
+    ClickTree(tree, TreeFind(tree, secondFile))
+    WaitUntil(() => InStr(WinGetTitle(main), secondFile) != 0, 'ShortPath clicking opens second file')
+    WaitUntil(() => TreeText(tree, SendMessage(0x110A, 9, 0, tree)) = secondFile, 'ShortPath click synchronizes long-name current file')
+    FinishSidebarScenario('ShortPath')
+}
+
+; Open the real localized folder picker via its menu command. The dialog owner,
+; title and editable path control must belong to this recorded test instance.
+OpenSidebarFolderDialog() {
+    global main, testPid
+    PostMessage(0x111, 40028, 0, , main)
+    dialog := WinWait('ahk_class #32770 ahk_pid ' testPid, , 5)
+    Check(dialog != 0, 'OpenFolder directory picker appears')
+    Check(WinGetTitle(dialog) = 'Select folder to show in the sidebar', 'OpenFolder picker has exact English title')
+    return dialog
+}
+
+; Cover confirm and cancel through the real directory dialog, including the
+; hidden/empty starting state, checked View menu and settings written on exit.
+RunOpenFolderScenario() {
+    global testDir, main
+    tree := StartSidebarScenario('', 0, testDir '\fixture\a.txt')
+    WaitUntil(() => !DllCall('IsWindowVisible', 'ptr', tree), 'OpenFolder starts with hidden sidebar')
+    Check(SendMessage(0x110A, 0, 0, tree) = 0, 'OpenFolder starts without a root')
+    dialog := OpenSidebarFolderDialog()
+    PostMessage(0x111, 2, 0, , dialog)
+    Check(WinWaitClose(dialog, , 3), 'OpenFolder hidden-state Cancel closes picker')
+    WaitUntil(() => !DllCall('IsWindowVisible', 'ptr', tree) && SendMessage(0x110A, 0, 0, tree) = 0, 'OpenFolder Cancel preserves hidden empty sidebar')
+    dialog := OpenSidebarFolderDialog()
+    edit := ControlGetHwnd('Edit1', dialog)
+    ControlSetText(testDir '\fixture', edit)
+    ; BM_CLICK targets the actual shell button; a synthetic WM_COMMAND without
+    ; its control handle does not reliably invoke IFileDialog's confirmation.
+    SendMessage(0xF5, 0, 0, ControlGetHwnd('Button1', dialog))
+    Check(WinWaitClose(dialog, , 5), 'OpenFolder path confirmation closes picker')
+    WaitUntil(() => DllCall('IsWindowVisible', 'ptr', tree), 'OpenFolder confirm shows sidebar')
+    WaitUntil(() => TreeText(tree, SendMessage(0x110A, 0, 0, tree)) = 'fixture', 'OpenFolder confirm sets selected directory root')
+    menu := DllCall('GetMenu', 'ptr', main, 'ptr')
+    SendMessage(0x116, menu, 0, , main)
+    menuState := 0
+    WaitUntil(() => (menuState := DllCall('GetMenuState', 'ptr', menu, 'uint', 41066, 'uint', 0, 'uint')) != 0xffffffff && (menuState & 8) != 0, 'OpenFolder View sidebar menu is checked')
+    root := SendMessage(0x110A, 0, 0, tree)
+    dialog := OpenSidebarFolderDialog()
+    PostMessage(0x111, 2, 0, , dialog)
+    Check(WinWaitClose(dialog, , 3), 'OpenFolder visible-state Cancel closes picker')
+    WaitUntil(() => DllCall('IsWindowVisible', 'ptr', tree) && SendMessage(0x110A, 0, 0, tree) = root, 'OpenFolder Cancel preserves visible root')
+    FinishSidebarScenario('OpenFolder')
+    visible := ReadSetting(testDir '\Notepad3.ini', 'ShowSidebar')
+    Check(visible = '1' || visible = 'true', 'OpenFolder visibility persisted')
+    Check(StrLower(PersistedSidebarFolder()) = StrLower(testDir '\fixture'), 'OpenFolder selected directory persisted')
+}
+
+; Return a control's parent-client left edge for bounded asynchronous layout checks.
+ControlLeft(control) {
+    ControlGetPos(&left, , , , control)
+    return left
+}
+
+; Resolve the documented environment-variable/relative INI representation before
+; comparing it with a fixture's absolute path. This does not consult the tree.
+PersistedSidebarFolder() {
+    global testDir
+    folder := ReadSetting(testDir '\Notepad3.ini', 'SidebarFolder')
+    expanded := Buffer(65536, 0)
+    if !DllCall('ExpandEnvironmentStringsW', 'str', folder, 'ptr', expanded, 'uint', 32768)
+        throw Error('Cannot expand persisted sidebar folder')
+    folder := StrGet(expanded)
+    if !RegExMatch(folder, 'i)^(?:[a-z]:\\|\\\\)')
+        folder := testDir '\' folder
+    full := Buffer(65536, 0)
+    if !DllCall('GetFullPathNameW', 'str', folder, 'uint', 32768, 'ptr', full, 'ptr', 0)
+        throw Error('Cannot resolve persisted sidebar folder')
+    return StrGet(full)
+}
 
 ; Return the OS creation FILETIME for pid, or zero if that process has exited.
 ; A creation timestamp prevents a recycled PID from authorizing window cleanup.

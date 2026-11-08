@@ -2,7 +2,7 @@
 # The AHK assertions use messages addressed to the test window, never global input.
 param(
     [ValidateSet('A','B','C','D','E','F')][string]$Through = 'F',
-    [ValidateSet('All','C','D','E','F','LongPath')][string]$Scenario = 'All',
+    [ValidateSet('All','C','D','E','F','LongPath','ShortPath','OpenFolder')][string]$Scenario = 'All',
     [ValidateSet('Light','Dark')][string]$Theme = 'Light',
     [string]$ScreenshotDirectory = '',
     [string]$Executable = (Join-Path $PSScriptRoot '..\Bin\Release_x64_v143\Notepad3.exe')
@@ -16,6 +16,10 @@ $stderrTask = $null
 [void](New-Item -ItemType Directory -Path $temp)
 try {
     Copy-Item -LiteralPath $Executable -Destination (Join-Path $temp 'Notepad3.exe')
+    # Keep the isolated instance's menu and dialog strings with its built executable.
+    $languages = Join-Path (Split-Path -Parent (Resolve-Path -LiteralPath $Executable).Path) 'lng'
+    if (!(Test-Path -LiteralPath $languages -PathType Container)) { throw "Language DLL directory not found: $languages" }
+    Copy-Item -LiteralPath $languages -Destination (Join-Path $temp 'lng') -Recurse
     $data = Join-Path $temp 'fixture'
     $themeValue = if ($Theme -eq 'Dark') { 1 } else { 2 }
     [void](New-Item -ItemType Directory -Path (Join-Path $data 'sub'))

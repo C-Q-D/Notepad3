@@ -413,6 +413,9 @@ void Sidebar_SetRoot(const HPATHL folder)
     TreeView_DeleteAllItems(s_tree);
     if (Path_IsExistingDirectory(normalized)) {
         Path_CanonicalizeEx(normalized, Paths.WorkingDirectory);
+        // FileLoad expands 8.3 names too; both roots and item paths must use
+        // that spelling before current-file containment and selection matching.
+        Path_GetLongPathNameEx(normalized);
         Path_Reset(Settings.SidebarFolder, Path_Get(normalized));
         LPCWSTR const name = Path_FindFileName(normalized);
         HTREEITEM const root = _Sidebar_Insert(TVI_ROOT, *name ? name : Path_Get(normalized), true);
