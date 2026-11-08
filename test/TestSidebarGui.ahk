@@ -978,6 +978,7 @@ RunFilterScenario() {
     FilterAssert(FilterFolderState(tree) = before, 'clear preserves expanded and collapsed folders')
     if screenshotDirectory != '' && results != tree
         CaptureWindow(main, screenshotDirectory '\filter-' StrLower(themeName) '-cleared-marker.png')
+    FilterShiftTab(tree, editor, 'folder tree')
 
     ControlSetText('zz-unfindable', filter)
     FilterWait(() => FilterFind(results, '[Clear filter]') != 0, 'no-match state includes clear action')
@@ -1007,6 +1008,8 @@ RunFilterScenario() {
     ControlFocus(results)
     TreeKey(results, 0x1B)
     FilterWait(() => ControlGetFocus(main) = filter && ControlGetText(filter) = 'Inner', 'result Escape returns to unchanged filter')
+    FilterShiftTab(results, editor, 'result tree')
+    FilterShiftTab(filter, editor, 'filter input')
 
     ; Use actual queued modifier input: a synchronous WM_CHAR would bypass the
     ; application's accelerator loop and cannot prove Ctrl+A belongs to EDIT.
@@ -1064,6 +1067,9 @@ RunFilterScenario() {
     ControlSetText('start', filter)
     ControlFocus(filter)
     TreeKey(filter, 0x0D)
+    ; KillTimer does not remove an already queued timer message. A stale RESUME
+    ; must not clear this new query's action or reset its debounce.
+    PostMessage(0x113, 3, 0, panel)
     FilterWait(() => EditorText(editor) = 'initial filter document', 'Enter during debounce opens new query result')
     ControlSetText('Inner', filter)
     ControlSetText('refresh-hit', filter)
@@ -1176,6 +1182,30 @@ RunFilterScenario() {
     Check(WinWaitClose(dialog, , 3), 'Filter close Cancel keeps test instance open')
     FilterWait(() => FilterFind(results, 'result-hit-00004.txt') != 0, 'cancelled close restarts query without navigation', 15000)
     FilterAssert(EditorText(editor) = unsaved && FileRead(folder '\start.txt', 'UTF-8') = disk, 'cancelled close preserves unsaved document and disk file')
+
+    ; Queue the new key with Cancel, before the low-priority RESUME timer can
+    ; restart the query. Use opposite old/new actions to detect stale navigation.
+    ControlSetText('result-hit-00005', filter)
+    Sleep(350)
+    ControlFocus(filter)
+    TreeKey(filter, 0x28)
+    PostMessage(0x10, 0, 0, , main)
+    dialog := WinWait('ahk_class #32770 ahk_pid ' testPid, , 3)
+    Check(dialog != 0, 'Filter fresh Enter save confirmation appears')
+    FilterCancelThenKey(dialog, panel, filter, 0x0D)
+    FilterWait(() => InStr(WinGetTitle(main), 'result-hit-00005.txt') != 0 && EditorText(editor) = '', 'new Enter before resume opens first result instead of old Down', 15000)
+
+    TypeText(editor, 'fresh-down-unsaved')
+    unsaved := EditorText(editor)
+    ControlSetText('result-hit-00006', filter)
+    Sleep(350)
+    ControlFocus(filter)
+    TreeKey(filter, 0x0D)
+    PostMessage(0x10, 0, 0, , main)
+    dialog := WinWait('ahk_class #32770 ahk_pid ' testPid, , 3)
+    Check(dialog != 0, 'Filter fresh Down save confirmation appears')
+    FilterCancelThenKey(dialog, panel, filter, 0x28)
+    FilterWait(() => ControlGetFocus(main) = results && TreeText(results, SendMessage(0x110A, 9, 0, results)) = 'result-hit-00006.txt' && EditorText(editor) = unsaved, 'new Down before resume focuses first result without old Enter', 15000)
     SendMessage(2014, 0, 0, editor)
     FinishSidebarScenario('Filter limits')
     if filterFailures
@@ -1380,7 +1410,7 @@ FilterClickClear(panel, filter) {
 ; SetKeyboardState changes this attached pair, never the user's desktop keyboard.
 ; Hold the full modifier combination through the queued transition, then restore
 ; and detach. Existing calls retain their Ctrl-only meaning; Alt uses WM_SYSKEY.
-FilterCtrlKey(control, key, shift := false, alt := false) {
+FilterCtrlKey(control, key, shift := false, alt := false, controlKey := true) {
     ownThread := DllCall('GetCurrentThreadId', 'uint')
     targetThread := DllCall('GetWindowThreadProcessId', 'ptr', control, 'ptr', 0, 'uint')
     if !DllCall('AttachThreadInput', 'uint', ownThread, 'uint', targetThread, 'int', true)
@@ -1390,7 +1420,7 @@ FilterCtrlKey(control, key, shift := false, alt := false) {
         DllCall('GetKeyboardState', 'ptr', previous)
         DllCall('RtlMoveMemory', 'ptr', pressed, 'ptr', previous, 'uptr', 256)
         for vk in [0x11, 0xA2]
-            NumPut('uchar', alt ? 0 : 0x80, pressed, vk)
+            NumPut('uchar', !alt && controlKey ? 0x80 : 0, pressed, vk)
         for vk in [0x10, 0xA0]
             NumPut('uchar', shift ? 0x80 : 0, pressed, vk)
         for vk in [0x12, 0xA4]
@@ -1406,6 +1436,41 @@ FilterCtrlKey(control, key, shift := false, alt := false) {
         DllCall('SetKeyboardState', 'ptr', previous)
         DllCall('AttachThreadInput', 'uint', ownThread, 'uint', targetThread, 'int', false)
     }
+}
+
+; An indented document makes an accidental main CMD_BACKTAB observable. Restore
+; the original fixture text after each control so one failure cannot mask another.
+FilterShiftTab(control, editor, name) {
+    global main
+    original := EditorText(editor)
+    SendMessage(2013, 0, 0, editor)
+    TypeText(editor, '    ' original)
+    SendMessage(2160, 4, 4, editor)
+    indented := EditorText(editor)
+    ControlFocus(control)
+    FilterCtrlKey(control, 0x09, true, false, false)
+    FilterWait(() => EditorText(editor) = indented && ControlGetFocus(main) = editor, name ' Shift+Tab returns to editor without changing indentation')
+    SendMessage(2013, 0, 0, editor)
+    TypeText(editor, original)
+    SendMessage(2014, 0, 0, editor)
+}
+
+; Post Cancel, capsule focus and the fresh key without sleeps or synchronous
+; focus calls. Posted input is processed before newly generated WM_TIMER messages.
+; The dialog must belong to the recorded isolated instance; no global input is used.
+FilterCancelThenKey(dialog, panel, filter, key) {
+    global testPid, testCreated
+    if WinGetPID(dialog) != testPid || ProcessCreationTime(testPid) != testCreated
+        throw Error('Test process identity changed before queued Cancel/input')
+    dpi := DllCall('GetDpiForWindow', 'ptr', panel, 'uint')
+    point := (Round(89 * dpi / 96) << 16) | Round(80 * dpi / 96)
+    for event in [[dialog, 0x111, 2, 0], [panel, 0x201, 1, point], [panel, 0x202, 0, point],
+        [filter, 0x100, key, 1], [filter, 0x101, key, 0xC0000001]] {
+        if !DllCall('PostMessageW', 'ptr', event[1], 'uint', event[2], 'uptr', event[3], 'ptr', event[4])
+            throw Error('Cannot queue Cancel and fresh filter input')
+    }
+    if !WinWaitClose(dialog, , 3)
+        throw Error('Queued Cancel did not close save confirmation')
 }
 
 ; Refresh main-menu checkmarks before reading a real command's checked state.

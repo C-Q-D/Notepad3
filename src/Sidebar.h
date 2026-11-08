@@ -43,7 +43,7 @@ void Sidebar_SetRoot(const HPATHL folder);
 void Sidebar_SyncToFile(const HPATHL file, bool fileOpened);
 // Re-enumerate the root and restore expanded paths/selection; rerun active filters.
 void Sidebar_Refresh(void);
-// Consume unmodified tree keyboard messages before main accelerators can turn
+// Consume tree navigation, including Shift combinations, before main accelerators turn
 // Enter into an editor newline or F5 into Revert. Filter editing keys belong to
 // EDIT; other Ctrl/Alt combinations pass on to the main-window accelerators.
 bool Sidebar_PreTranslateMessage(MSG* message);

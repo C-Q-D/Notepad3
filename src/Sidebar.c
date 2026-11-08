@@ -1492,12 +1492,12 @@ static void _Sidebar_ActivateResult(HTREEITEM item)
     }
 }
 
-// Defer Down/Enter until the current debounced scan completes. Fast typing then
-// Enter must open the new query's first result, never a row from an older query.
+// Defer Down/Enter while resuming, debouncing or scanning the current query.
+// Cancellation has already discarded old actions; keys after Cancel are new.
 static void _Sidebar_FirstResultKey(bool open)
 {
     if (!_Sidebar_CanInteract()) { return; }
-    if (s_filterDue || s_scan) { s_filterAction = open ? 2 : 1; return; }
+    if (s_filterRestart || s_filterDue || s_scan) { s_filterAction = open ? 2 : 1; return; }
     HTREEITEM const header = TreeView_GetRoot(s_results);
     HTREEITEM const first = header ? TreeView_GetNextSibling(s_results, header) : NULL;
     if (first && s_resultCount) {
@@ -2111,8 +2111,22 @@ static LRESULT CALLBACK _Sidebar_PanelProc(HWND hwnd, UINT message, WPARAM wPara
     switch (message) {
     case WM_TIMER:
         if (wParam == SIDEBAR_RESUME_TIMER) {
-            if (!Settings.ShowSidebar || !IsWindowVisible(hwnd)) { KillTimer(hwnd, SIDEBAR_RESUME_TIMER); }
-            else if (_Sidebar_CanInteract()) { _Sidebar_FilterChanged(); }
+            // KillTimer can leave a queued message. It must not restart a newer
+            // query or clear that query's pending action after cancellation.
+            if (!s_filterRestart) { return 0; }
+            if (!Settings.ShowSidebar || !IsWindowVisible(hwnd)) {
+                KillTimer(hwnd, SIDEBAR_RESUME_TIMER);
+                s_filterRestart = false;
+                s_filterAction = 0;
+            } else if (_Sidebar_CanInteract()) {
+                // Preserve only input received since Sidebar_CancelPending.
+                // A failed debounce setup must not retain an orphaned action.
+                int const action = s_filterAction;
+                _Sidebar_FilterChanged();
+                if (s_filterDue) { s_filterAction = action; }
+            } else {
+                s_filterAction = 0;
+            }
             return 0;
         }
         // Pause recursive I/O during any modal loop and discard queued navigation
@@ -2359,7 +2373,7 @@ bool Sidebar_PreTranslateMessage(MSG* message)
                     SendMessage(s_filter, EM_SETSEL, 0, -1);
                     return true;
                 }
-                if (!control && !shift) {
+                if (!control) {
                     switch (message->wParam) {
                     case VK_ESCAPE:
                         if (s_query[0]) { SetWindowTextW(s_filter, L""); }
@@ -2381,7 +2395,7 @@ bool Sidebar_PreTranslateMessage(MSG* message)
         }
     }
     if (message->hwnd == s_results && message->message >= WM_KEYFIRST && message->message <= WM_KEYLAST &&
-        GetKeyState(VK_CONTROL) >= 0 && GetKeyState(VK_MENU) >= 0 && GetKeyState(VK_SHIFT) >= 0) {
+        GetKeyState(VK_CONTROL) >= 0 && GetKeyState(VK_MENU) >= 0) {
         if (message->message == WM_KEYDOWN) {
             _Sidebar_SetHint(NULL);
             switch (message->wParam) {
@@ -2404,7 +2418,7 @@ bool Sidebar_PreTranslateMessage(MSG* message)
         return true;
     }
     if (!s_tree || message->hwnd != s_tree || message->message < WM_KEYFIRST ||
-        message->message > WM_KEYLAST || GetKeyState(VK_CONTROL) < 0 || GetKeyState(VK_MENU) < 0 || GetKeyState(VK_SHIFT) < 0) {
+        message->message > WM_KEYLAST || GetKeyState(VK_CONTROL) < 0 || GetKeyState(VK_MENU) < 0) {
         return false;
     }
     if (message->message == WM_KEYDOWN) {
@@ -2425,7 +2439,8 @@ bool Sidebar_PreTranslateMessage(MSG* message)
         }
     }
     // Let TreeView implement arrows, incremental search and other native keys.
-    // They must bypass the editor's unmodified accelerators as well.
+    // Shift navigation keeps the sidebar's existing behavior too; only Ctrl/Alt
+    // combinations pass through to the main-window accelerator table.
     TranslateMessage(message);
     DispatchMessage(message);
     return true;
