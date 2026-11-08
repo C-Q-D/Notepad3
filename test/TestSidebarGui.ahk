@@ -742,6 +742,32 @@ RunRecentReworkScenarios() {
     }
     FinishSidebarScenario('Recent same file menus')
     RecentAssert(!InStr(ReadSetting(ini, 'SidebarRecentHidden', ''), file), 'Recent same-file menu activation persists removal of hidden path')
+    RunRecentFolderColumnScenario()
+}
+
+; Keep a root-internal relative path longer than MAX_PATH in the Recent scene.
+; Folder-column visibility is checked in before/after screenshots, not pixels.
+RunRecentFolderColumnScenario() {
+    global testDir, main, screenshotDirectory, themeName, logFile
+    relative := 'column-proof-'
+    while StrLen(relative) < 80
+        relative .= 'x'
+    segment := ''
+    Loop 80
+        segment .= 'y'
+    Loop 3
+        relative .= '\' segment
+    folder := testDir '\fixture\' relative
+    file := folder '\inside.txt'
+    DirCreate('\\?\' folder)
+    FileAppend('root internal long relative folder', '\\?\' file, 'UTF-8')
+    FileAppend('Recent internal folder relative characters including slash and NUL: ' (StrLen(relative '\') + 1) '`n', logFile)
+    WriteRecentReworkIni(file)
+    tree := ResumeRecentScenario(file)
+    FileAppend('Recent internal folder visible entries: ' RecentNames(tree) '`n', logFile)
+    if screenshotDirectory != ''
+        CaptureWindow(main, screenshotDirectory '\sidebar-recent-internal-long-' StrLower(themeName) '.png')
+    FinishSidebarScenario('Recent internal long folder')
 }
 
 ; Replace only this isolated fixture's settings. A no-watch default keeps menu

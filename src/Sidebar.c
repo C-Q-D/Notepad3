@@ -1113,14 +1113,18 @@ static void _Sidebar_DrawRecentRow(HDC dc, HTREEITEM item, LPCWSTR name, RECT te
     if (_Sidebar_WidthTier(MulDiv(client.right, 96, s_dpi)) == 0) {
         HPATHL folder = Path_Allocate(name);
         Path_RemoveFileSpec(folder);
-        WCHAR where[MAX_PATH_EXPLICIT];
-        if (_Sidebar_AbbreviateFolder(Path_Get(Settings.SidebarFolder), Path_Get(folder), where, COUNTOF(where))) {
+        // Reserve the full folder plus separators, ellipsis and NUL. Shorten only
+        // when drawing, so long root-relative labels cannot disappear.
+        HSTRINGW folderLabel = StrgCreate(NULL);
+        LPWSTR const where = StrgWriteAccessBuf(folderLabel, Path_GetLength(folder) + 4);
+        if (_Sidebar_AbbreviateFolder(Path_Get(Settings.SidebarFolder), Path_Get(folder), where, StrgGetAllocLength(folderLabel))) {
             RECT column = text;
             int const available = max_i(0, text.right - text.left);
             column.left = text.right - min_i(available / 2, SidebarDrawing_Measure(dc, s_drawing, where, SidebarFontSmall));
             SidebarDrawing_Text(dc, s_drawing, where, SidebarFontSmall, column, p->weak);
             text.right = max_i(text.left, column.left - _Sidebar_Pixels(10));
         }
+        StrgDestroy(folderLabel);
         Path_Release(folder);
     }
     SidebarDrawing_Text(dc, s_drawing, PathFindFileNameW(name), current ? SidebarFontBold : SidebarFontBody,
