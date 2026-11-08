@@ -860,6 +860,8 @@ RecentWait(condition, name, timeoutMs := 3000) {
     while !condition.Call() && A_TickCount - start < timeoutMs
         Sleep(25)
     RecentAssert(condition.Call(), name)
+}
+
 ; Click one painted header action in panel-client pixels, without desktop input.
 ; action is New or Refresh; the layout follows the approved 30px header circles.
 ClickSidebarAction(tree, action) {

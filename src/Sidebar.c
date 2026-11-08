@@ -1158,13 +1158,16 @@ static INT_PTR CALLBACK _Sidebar_NewFileProc(HWND dialog, UINT message, WPARAM w
 static void _Sidebar_NewFile(void)
 {
     if (!Path_IsExistingDirectory(Settings.SidebarFolder)) { return; }
-    HPATHL folder = _Sidebar_ItemPath(TreeView_GetSelection(s_tree));
-    if (Path_IsEmpty(folder)) { Path_Reset(folder, Path_Get(Settings.SidebarFolder)); }
-    else {
-        WCHAR name[MAX_PATH_EXPLICIT];
-        LPARAM kind;
-        if (_Sidebar_GetItem(TreeView_GetSelection(s_tree), name, &kind) && (kind == SIDEBAR_FILE || kind == SIDEBAR_EMPTY)) { Path_RemoveFileSpec(folder); }
+    // Hint rows have no path of their own; an empty-folder hint targets its folder.
+    HTREEITEM target = TreeView_GetSelection(s_tree);
+    WCHAR name[MAX_PATH_EXPLICIT];
+    LPARAM kind = 0;
+    if (target && _Sidebar_GetItem(target, name, COUNTOF(name), &kind) && kind == SIDEBAR_EMPTY) {
+        target = TreeView_GetParent(s_tree, target);
     }
+    HPATHL folder = _Sidebar_ItemPath(target);
+    if (Path_IsEmpty(folder)) { Path_Reset(folder, Path_Get(Settings.SidebarFolder)); }
+    else if (kind == SIDEBAR_FILE || kind == SIDEBAR_RECENT_ITEM) { Path_RemoveFileSpec(folder); }
     if (!Path_IsExistingDirectory(folder)) { Path_Release(folder); return; }
     DWORD storage[128] = { 0 };
     DLGTEMPLATE* const layout = (DLGTEMPLATE*)storage;
