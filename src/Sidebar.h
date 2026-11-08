@@ -12,7 +12,7 @@ enum { SIDEBAR_MAX_RECENT_HIDDEN = 32 };
 // Scale the shared 1-logical-pixel panel/editor stroke to dpi, at least one pixel.
 int Sidebar_GetStrokeWidth(UINT dpi);
 
-// Create the panel, its tree/EDIT and the sibling drag gap for parent. Root
+// Create the panel, folder/result trees, EDIT and sibling drag gap for parent. Root
 // restoration follows startup FileLoad. Return false on resource/control failure.
 bool Sidebar_Create(HWND parent);
 // Show or hide the panel and drag gap; hiding returns focus from any panel child.
@@ -26,6 +26,7 @@ void Sidebar_OnThemeChanged(void);
 // Replace the groups with folder (non-null path handle) as the directory group's
 // path anchor. Missing folders retain the recent group without a dialog. On success
 // persist the canonical long-name root and restore both group collapse settings.
+// An active filter is cancelled and searched again against the replacement root.
 void Sidebar_SetRoot(const HPATHL folder);
 // Select and reveal file within the root; clear selection outside it or when empty.
 // A missing entry in an already loaded parent triggers a local re-enumeration.
@@ -33,10 +34,12 @@ void Sidebar_SetRoot(const HPATHL folder);
 // Refresh recent files independently of the root and visibility. fileOpened is
 // true only for a successful open/explicit same-file activation: remove that
 // nonempty file from sidebar hides. Reloads (including automatic file watching),
-// layout, saves and root changes pass false.
+// layout, saves and root changes pass false. While filtering, update result
+// drawing without changing the hidden folder tree.
 void Sidebar_SyncToFile(const HPATHL file, bool fileOpened);
-// Re-enumerate the root and restore expanded paths and selection where they exist.
+// Re-enumerate the root and restore expanded paths/selection; rerun active filters.
 void Sidebar_Refresh(void);
 // Consume unmodified tree keyboard messages before main accelerators can turn
-// Enter into an editor newline or F5 into Revert. Ctrl/Alt combinations pass on.
+// Enter into an editor newline or F5 into Revert. Filter editing keys belong to
+// EDIT; other Ctrl/Alt combinations pass on to the main-window accelerators.
 bool Sidebar_PreTranslateMessage(MSG* message);

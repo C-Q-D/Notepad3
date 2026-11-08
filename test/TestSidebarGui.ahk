@@ -252,6 +252,8 @@ try {
         RunRecentScenario()
     if Ord(through) >= Ord('F') && (scenario = 'All' || scenario = 'Create')
         RunCreateScenario()
+    if Ord(through) >= Ord('F') && (scenario = 'All' || scenario = 'Filter')
+        RunFilterScenario()
 } catch Error as err {
     FileAppend('FAIL: ' err.Message '`n', logFile)
     exitCode := 1
@@ -928,6 +930,219 @@ CreateOwnedMessage(dialog) {
     return 0
 }
 
+; Run the filter contract against native controls and real files. Assertions keep
+; going after a failure so the pre-feature run records each independent mismatch.
+; No production-only testing messages or hidden text controls are required.
+RunFilterScenario() {
+    global testDir, main, testPid, screenshotDirectory, themeName, filterFailures
+    filterFailures := 0
+    folder := testDir '\filter-root'
+    DirCreate(folder '\closed')
+    DirCreate(folder '\kept\deep')
+    DirCreate(folder '\folder-only')
+    FileAppend('nested filter document', folder '\closed\Inner.txt', 'UTF-8')
+    FileAppend('initial filter document', folder '\start.txt', 'UTF-8')
+    FileAppend('kept document', folder '\kept\keep.txt', 'UTF-8')
+    FileAppend('unrelated', folder '\folder-only\other.dat', 'UTF-8')
+    FileAppend('not executable', folder '\needle.exe', 'UTF-8')
+    FileAppend('hidden', folder '\hidden-hit.txt', 'UTF-8')
+    FileAppend('system', folder '\system-hit.txt', 'UTF-8')
+    FileSetAttrib('+H', folder '\hidden-hit.txt')
+    FileSetAttrib('+S', folder '\system-hit.txt')
+    tree := StartSidebarScenario(folder, 1, folder '\start.txt')
+    DllCall('SetWindowPos', 'ptr', main, 'ptr', 0, 'int', 80, 'int', 80, 'int', 1100, 'int', 750, 'uint', 0x14)
+    panel := DllCall('GetParent', 'ptr', tree, 'ptr')
+    editor := ControlGetHwnd('Scintilla1', main)
+    filter := ControlGetHwnd('Edit1', panel)
+    results := 0
+    try results := ControlGetHwnd('SysTreeView322', main)
+    FilterAssert(results != 0 && results != tree, 'second tree is created after folder tree')
+    ; An absent result control still gives meaningful baseline failures, without
+    ; replacing any expected value with what the unfinished implementation does.
+    if !results
+        results := tree
+    SendMessage(0x1102, 2, TreeFind(tree, 'kept'), tree)
+    before := FilterFolderState(tree)
+    ControlSetText('iNNeR', filter)
+    FilterWait(() => FilterFind(results, 'Inner.txt') != 0 && !DllCall('IsWindowVisible', 'ptr', tree), 'collapsed descendants match case-insensitive filename')
+    FilterAssert(TreeText(results, SendMessage(0x110A, 0, 0, results)) = '# Matched 1 files', 'result header gives exact match count')
+    hit := FilterFind(results, 'Inner.txt')
+    if hit
+        ClickTree(results, hit, true)
+    FilterWait(() => EditorText(editor) = 'nested filter document', 'result click opens nested file')
+    FilterAssert(FilterFolderState(tree) = before, 'opening result leaves same folder handles and expansion states')
+    if screenshotDirectory != '' && results != tree
+        CaptureWindow(main, screenshotDirectory '\filter-' StrLower(themeName) '-results.png')
+    FilterClickClear(panel, filter)
+    FilterWait(() => ControlGetText(filter) = '' && DllCall('IsWindowVisible', 'ptr', tree) && !DllCall('IsWindowVisible', 'ptr', results), 'capsule clear button restores folder tree')
+    FilterAssert(FilterFolderState(tree) = before, 'clear preserves expanded and collapsed folders')
+
+    ControlSetText('zz-unfindable', filter)
+    FilterWait(() => FilterFind(results, '[Clear filter]') != 0, 'no-match state includes clear action')
+    FilterAssert(FilterFind(results, 'No file name contains “zz-unfindable”') != 0, 'no-match message includes exact query')
+    if screenshotDirectory != '' && results != tree
+        CaptureWindow(main, screenshotDirectory '\filter-' StrLower(themeName) '-empty.png')
+    clear := FilterFind(results, '[Clear filter]')
+    if clear
+        ClickTree(results, clear, true)
+    FilterWait(() => ControlGetText(filter) = '', 'no-match clear action empties input')
+    ControlSetText('folder-only', filter)
+    FilterWait(() => FilterFind(results, '[Clear filter]') != 0 && TreeText(results, SendMessage(0x110A, 0, 0, results)) = '# Matched 0 files', 'folder names are excluded from matching')
+
+    ControlSetText('Inner', filter)
+    ControlFocus(filter)
+    TreeKey(filter, 0x1B)
+    FilterWait(() => ControlGetText(filter) = '' && ControlGetFocus(main) = filter, 'first Escape clears input and keeps filter focus')
+    ControlSetText('', filter)
+    ControlFocus(filter)
+    TreeKey(filter, 0x1B)
+    FilterWait(() => ControlGetFocus(main) = editor, 'empty Escape returns to editor')
+    ControlSetText('Inner', filter)
+    FilterWait(() => FilterFind(results, 'Inner.txt') != 0, 'typing restarts search after Escape')
+    ControlFocus(filter)
+    TreeKey(filter, 0x28)
+    FilterWait(() => ControlGetFocus(main) = results && TreeText(results, SendMessage(0x110A, 9, 0, results)) = 'Inner.txt', 'Down focuses first result')
+    ControlFocus(results)
+    TreeKey(results, 0x1B)
+    FilterWait(() => ControlGetFocus(main) = filter && ControlGetText(filter) = 'Inner', 'result Escape returns to unchanged filter')
+
+    ; Use actual queued modifier input: a synchronous WM_CHAR would bypass the
+    ; application's accelerator loop and cannot prove Ctrl+A belongs to EDIT.
+    ControlSetText('AbCInner', filter)
+    SendMessage(2160, 1, 1, editor)
+    ControlFocus(filter)
+    SendMessage(0xB1, 8, 8, filter)
+    FilterCtrlKey(filter, 0x41)
+    FilterWait(() => SendMessage(0xB0, 0, 0, filter) = 0x00080000 && SendMessage(2143, 0, 0, editor) = 1 && SendMessage(2145, 0, 0, editor) = 1, 'Ctrl+A selects filter text and leaves editor selection unchanged')
+    ControlSetText('start', filter)
+    FilterWait(() => FilterFind(results, 'start.txt') != 0, 'changed query replaces old results')
+    ControlFocus(filter)
+    TreeKey(filter, 0x0D)
+    FilterWait(() => EditorText(editor) = 'initial filter document', 'filter Enter opens first result')
+    ControlSetText('Inner', filter)
+    FilterWait(() => FilterFind(results, 'Inner.txt') != 0, 'second query completes before result Enter')
+    hit := FilterFind(results, 'Inner.txt')
+    if hit
+        SendMessage(0x110B, 9, hit, results)
+    ControlFocus(results)
+    TreeKey(results, 0x0D)
+    FilterWait(() => EditorText(editor) = 'nested filter document', 'result Enter opens selected file')
+
+    ControlSetText('needle', filter)
+    FilterWait(() => FilterFind(results, 'needle.exe') != 0, 'binary files remain searchable')
+    hit := FilterFind(results, 'needle.exe')
+    if hit
+        ClickTree(results, hit, true)
+    Sleep(250)
+    dialog := WinExist('ahk_class #32770 ahk_pid ' testPid)
+    FilterAssert(!dialog && EditorText(editor) = 'nested filter document', 'binary result click does not open file')
+    FilterDismissDialog(dialog)
+    ControlFocus(results)
+    TreeKey(results, 0x0D)
+    Sleep(250)
+    dialog := WinExist('ahk_class #32770 ahk_pid ' testPid)
+    FilterAssert(!dialog && EditorText(editor) = 'nested filter document', 'binary result Enter does not open file')
+    FilterDismissDialog(dialog)
+
+    ControlSetText('refresh-hit', filter)
+    FilterWait(() => FilterFind(results, '[Clear filter]') != 0, 'refresh fixture is initially absent')
+    FileAppend('new after refresh', folder '\closed\refresh-hit.txt', 'UTF-8')
+    ControlFocus(results)
+    TreeKey(results, 0x74)
+    FilterWait(() => FilterFind(results, 'refresh-hit.txt') != 0 && ControlGetText(filter) = 'refresh-hit', 'refresh reruns active query')
+    ControlSetText('start', filter)
+    ControlFocus(filter)
+    TreeKey(filter, 0x0D)
+    FilterWait(() => EditorText(editor) = 'initial filter document', 'Enter during debounce opens new query result')
+    ControlSetText('Inner', filter)
+    ControlSetText('refresh-hit', filter)
+    FilterWait(() => FilterFind(results, 'refresh-hit.txt') != 0 && FilterFind(results, 'Inner.txt') = 0 && TreeText(results, SendMessage(0x110A, 0, 0, results)) = '# Matched 1 files', 'rapid text replacement discards old query results')
+
+    replacement := testDir '\filter-replacement'
+    DirCreate(replacement)
+    FileAppend('new root', replacement '\refresh-hit-new-root.txt', 'UTF-8')
+    dialog := OpenSidebarFolderDialog()
+    ControlSetText(replacement, ControlGetHwnd('Edit1', dialog))
+    SendMessage(0xF5, 0, 0, ControlGetHwnd('Button1', dialog))
+    Check(WinWaitClose(dialog, , 5), 'Filter root picker closes')
+    FilterWait(() => FilterFind(results, 'refresh-hit-new-root.txt') != 0 && FilterFind(results, 'refresh-hit.txt') = 0 && ControlGetText(filter) = 'refresh-hit', 'root change reruns query without stale paths')
+    FinishSidebarScenario('Filter changed root')
+    tree := StartSidebarScenario(folder, 1, folder '\start.txt')
+    panel := DllCall('GetParent', 'ptr', tree, 'ptr')
+    filter := ControlGetHwnd('Edit1', panel)
+    results := tree
+    try results := ControlGetHwnd('SysTreeView322', main)
+    ControlSetText('hit.txt', filter)
+    FilterWait(() => FilterFind(results, 'hidden-hit.txt') != 0 && FilterFind(results, 'system-hit.txt') != 0, 'show-hidden true includes hidden and system files')
+    FinishSidebarScenario('Filter visible entries')
+    tree := StartSidebarScenario(folder, 1, folder '\start.txt', false)
+    panel := DllCall('GetParent', 'ptr', tree, 'ptr')
+    filter := ControlGetHwnd('Edit1', panel)
+    results := tree
+    try results := ControlGetHwnd('SysTreeView322', main)
+    ControlSetText('hit.txt', filter)
+    FilterWait(() => FilterFind(results, 'refresh-hit.txt') != 0, 'show-hidden false still finds visible descendant')
+    FilterAssert(FilterFind(results, 'hidden-hit.txt') = 0 && FilterFind(results, 'system-hit.txt') = 0, 'show-hidden false excludes hidden and system entries')
+    FinishSidebarScenario('Filter hidden entries')
+    ; Put the large fixture below a collapsed child so folder-tree startup only
+    ; counts one capped level. Result and scan limits must apply to recursive I/O.
+    DirCreate(testDir '\filter-limits\bulk')
+    Loop 201
+        FileAppend('', testDir '\filter-limits\bulk\result-hit-' Format('{:05}', A_Index) '.txt')
+    tree := StartSidebarScenario(testDir '\filter-limits', 1, folder '\start.txt')
+    panel := DllCall('GetParent', 'ptr', tree, 'ptr')
+    filter := ControlGetHwnd('Edit1', panel)
+    results := tree
+    try results := ControlGetHwnd('SysTreeView322', main)
+    ControlSetText('result-hit', filter)
+    FilterWait(() => SendMessage(0x1105, 0, 0, results) = 201 && TreeText(results, SendMessage(0x110A, 0, 0, results)) = '# Matched 200 files', '201 matches display exactly 200 result rows', 6000)
+    if screenshotDirectory != '' && results != tree
+        CaptureWindow(main, screenshotDirectory '\filter-' StrLower(themeName) '-result-limit.png')
+    Loop 20001
+        FileAppend('', testDir '\filter-limits\bulk\scan-item-' Format('{:05}', A_Index) '.dat')
+    ControlSetText('no-scan-file-matches', filter)
+    FilterWait(() => FilterFind(results, '[Clear filter]') != 0, 'large recursive scan completes with an actionable empty state', 15000)
+    if screenshotDirectory != '' && results != tree
+        CaptureWindow(main, screenshotDirectory '\filter-' StrLower(themeName) '-scan-limit.png')
+    ControlSetText('no-scan-file-matches', filter)
+    Sleep(350)
+    ControlFocus(filter)
+    TreeKey(filter, 0x1B)
+    FilterWait(() => ControlGetText(filter) = '' && DllCall('IsWindowVisible', 'ptr', tree), 'Escape cancels in-progress large scan', 1200)
+    ControlSetText('result-hit-00001', filter)
+    FilterWait(() => FilterFind(results, 'result-hit-00001.txt') != 0 && TreeText(results, SendMessage(0x110A, 0, 0, results)) = '# Matched 1 files', 'replacement search excludes cancelled scan completion', 15000)
+    FinishSidebarScenario('Filter limits')
+    if filterFailures
+        throw Error('Filter contract failures: ' filterFailures)
+}
+
+; Record a named observable filter failure without aborting the remaining cases.
+FilterAssert(pass, name) {
+    global filterFailures, logFile
+    FileAppend((pass ? 'PASS: Filter ' : 'FAIL: Filter ') name '`n', logFile)
+    if !pass
+        filterFailures += 1
+}
+
+; Wait for asynchronous filter UI state, then retain its independent assertion.
+FilterWait(condition, name, timeoutMs := 1200) {
+    start := A_TickCount
+    while !condition.Call() && A_TickCount - start < timeoutMs
+        Sleep(25)
+    FilterAssert(condition.Call(), name)
+}
+
+; Result rows are top-level siblings, independent of the folder-group structure.
+FilterFind(tree, name) {
+    item := SendMessage(0x110A, 0, 0, tree)
+    while item {
+        if TreeText(tree, item) = name
+            return item
+        item := SendMessage(0x110A, 1, item, tree)
+    }
+    return 0
+}
+
 ; Exercise refresh, selection-derived destinations, CREATE_NEW and invalid-name
 ; rejection at real filesystem/window boundaries. Fixtures are unique to this
 ; runner; every successful creation must also reach the normal editor open path.
@@ -1078,6 +1293,56 @@ RunCreateScenario() {
     FinishSidebarScenario('Create no root')
 }
 
+; Snapshot the same named folder handles, expanded bits and loaded children.
+; Rebuilding or expanding the hidden tree changes this snapshot and must fail.
+FilterFolderState(tree) {
+    closed := TreeFind(tree, 'closed'), kept := TreeFind(tree, 'kept'), deep := TreeFind(tree, 'deep', kept)
+    return (closed ':' SendMessage(0x1127, closed, 0x20, tree) ':' SendMessage(0x110A, 4, closed, tree)
+        '|' kept ':' SendMessage(0x1127, kept, 0x20, tree) ':' deep ':' SendMessage(0x1127, deep, 0x20, tree))
+}
+
+; Click the capsule's trailing clear action using panel-local coordinates at DPI.
+FilterClickClear(panel, filter) {
+    dpi := DllCall('GetDpiForWindow', 'ptr', panel, 'uint')
+    ControlGetPos(, , &width, , panel)
+    point := (Round(89 * dpi / 96) << 16) | Round(width - 29 * dpi / 96)
+    PostMessage(0x201, 1, point, panel)
+    PostMessage(0x202, 0, point, panel)
+}
+
+; Share only the isolated test window's input queue while posting a modifier key.
+; SetKeyboardState changes this attached pair, never the user's desktop keyboard.
+; Hold Ctrl for the queued key transition, then restore and detach in all cases.
+FilterCtrlKey(control, key) {
+    ownThread := DllCall('GetCurrentThreadId', 'uint')
+    targetThread := DllCall('GetWindowThreadProcessId', 'ptr', control, 'ptr', 0, 'uint')
+    if !DllCall('AttachThreadInput', 'uint', ownThread, 'uint', targetThread, 'int', true)
+        throw Error('Cannot attach isolated test input queue')
+    previous := Buffer(256, 0), pressed := Buffer(256, 0)
+    try {
+        DllCall('GetKeyboardState', 'ptr', previous)
+        DllCall('RtlMoveMemory', 'ptr', pressed, 'ptr', previous, 'uptr', 256)
+        NumPut('uchar', 0x80, pressed, 0x11)
+        NumPut('uchar', 0x80, pressed, 0xA2)
+        DllCall('SetKeyboardState', 'ptr', pressed)
+        TreeKey(control, key)
+        Sleep(150)
+    } finally {
+        DllCall('SetKeyboardState', 'ptr', previous)
+        DllCall('AttachThreadInput', 'uint', ownThread, 'uint', targetThread, 'int', false)
+    }
+}
+
+; After recording a failed binary assertion, cancel only the test instance's
+; unexpected modal so remaining independent filter assertions can still run.
+FilterDismissDialog(dialog) {
+    if dialog {
+        PostMessage(0x111, 2, 0, , dialog)
+        if !WinWaitClose(dialog, , 3)
+            throw Error('Unexpected binary dialog did not accept Cancel')
+    }
+}
+
 ; Exercise group persistence through real clicks, normal close and fresh startup.
 ; Added fixtures live only in this runner's directory, after B's exact order check.
 RunGroupsScenario() {
@@ -1213,12 +1478,12 @@ LongPathRefreshItem(tree, segment) {
 ; its tree through a visibility toggle. folder may be empty or an 8.3 alias;
 ; visible is 0/1 and file is an existing absolute path opened without editing.
 ; Return the tree handle; failed startup/assertions throw to the owner's cleanup.
-StartSidebarScenario(folder, visible, file) {
+StartSidebarScenario(folder, visible, file, showHidden := true) {
     global testDir, testPid, testCreated, main, themeName
     ini := testDir '\Notepad3.ini'
     FileDelete(ini)
     FileAppend('[Settings]`r`nSettingsVersion=5`r`nSaveSettings=1`r`nSaveRecentFiles=0`r`n'
-        'ShowSidebar=' visible '`r`nSidebarWidth=300`r`nSidebarFolder=' folder '`r`n'
+        'ShowSidebar=' visible '`r`nSidebarWidth=300`r`nSidebarFolder=' folder '`r`nSidebarShowHidden=' (showHidden ? 1 : 0) '`r`n'
         'ReuseWindow=0`r`nSingleFileInstance=0`r`nWinThemeDarkMode=' (themeName = 'Dark' ? 1 : 2)
         '`r`n[Settings2]`r`nPreferredLanguageLocaleName=en-US`r`n', ini, 'UTF-8')
     Run('"' testDir '\Notepad3.exe" /n "' file '"', testDir, , &testPid)

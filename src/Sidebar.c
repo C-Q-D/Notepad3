@@ -16,22 +16,45 @@ static HWND s_tree = NULL;
 static HWND s_splitter = NULL;
 static HWND s_panel = NULL;
 static HWND s_filter = NULL;
+static HWND s_results = NULL;
 static HWND s_tooltip = NULL;
 static SidebarDrawing* s_drawing = NULL;
 static UINT s_dpi = 96;
 static int s_hover = 0;
 static WCHAR s_hint[MAX_PATH_EXPLICIT];
-static RECT s_filterRect, s_newRect, s_refreshRect, s_hiddenRect, s_sortRect;
+static RECT s_filterRect, s_newRect, s_refreshRect, s_hiddenRect, s_sortRect, s_clearRect;
 static int _Sidebar_ClampWidth(int logicalWidth, int clientWidth, UINT dpi);
 static void _Sidebar_UpdateChrome(void);
 static int _Sidebar_Pixels(int logical);
-static HTREEITEM _Sidebar_RowAt(POINT point);
+static HTREEITEM _Sidebar_RowAt(HWND tree, POINT point);
 static void _Sidebar_ActivateRow(HTREEITEM item, POINT point);
+static void _Sidebar_FilterChanged(void);
+static void _Sidebar_SetHint(LPCWSTR text);
+static void _Sidebar_ActivateResult(HTREEITEM item);
+static void _Sidebar_FirstResultKey(bool open);
+static void _Sidebar_LayoutChildren(void);
 static HTREEITEM s_recent = NULL, s_folders = NULL, s_currentItem = NULL, s_hotItem = NULL, s_pressedItem = NULL;
 static HTREEITEM s_recentCurrentItem = NULL;
 static int s_recentCount = 0;
 static UINT s_rootDirectories = 0, s_rootFiles = 0;
 static bool s_restoreGroupCollapse = false;
+static WCHAR s_query[MAX_PATH_EXPLICIT];
+enum { SIDEBAR_FILTER_DELAY = 200, SIDEBAR_SCAN_LIMIT = 20000, SIDEBAR_RESULT_LIMIT = 200,
+       SIDEBAR_SCAN_BATCH = 64, SIDEBAR_SCAN_BUDGET_MS = 6, SIDEBAR_FILTER_TIMER = 1, SIDEBAR_SCAN_TIMER = 2 };
+// A depth-first scan owns its directory handles and paths on the UI thread.
+// Timer slices release control between batches; replacing the query closes all
+// frames before starting again. Results own at most 200 independent paths.
+typedef struct SidebarScan {
+    HPATHL folder;
+    HANDLE search;
+    struct SidebarScan* parent;
+} SidebarScan;
+static SidebarScan* s_scan = NULL;
+static HPATHL s_resultPaths[SIDEBAR_RESULT_LIMIT];
+static UINT s_resultCount = 0, s_scanned = 0;
+static ULONGLONG s_filterDue = 0;
+static int s_filterAction = 0;
+static HTREEITEM s_resultHot = NULL, s_resultPressed = NULL;
 
 // Opaque colors include the specified alpha blended against each local surface.
 typedef struct SidebarPalette {
@@ -58,6 +81,7 @@ static SidebarPalette const* s_palette = &s_lightPalette;
 // The panel name exposes the same visible status to assistive technology.
 static void _Sidebar_SetHint(LPCWSTR text)
 {
+    if (!text && !s_hint[0]) { return; }
     StringCchCopy(s_hint, COUNTOF(s_hint), text ? text : L"");
     if (s_panel) {
         SetWindowText(s_panel, s_hint);
@@ -122,19 +146,19 @@ static LRESULT CALLBACK _Sidebar_TreeProc(HWND hwnd, UINT message, WPARAM wParam
     POINT const point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
     if (message == WM_LBUTTONDOWN) {
         SetFocus(hwnd);
-        s_pressedItem = _Sidebar_RowAt(point);
+        s_pressedItem = _Sidebar_RowAt(hwnd, point);
         if (s_pressedItem) { TreeView_SelectItem(hwnd, s_pressedItem); }
         return 0;
     }
     if (message == WM_LBUTTONUP) {
         HTREEITEM const pressed = s_pressedItem;
         s_pressedItem = NULL;
-        if (pressed && pressed == _Sidebar_RowAt(point)) { _Sidebar_ActivateRow(pressed, point); }
+        if (pressed && pressed == _Sidebar_RowAt(hwnd, point)) { _Sidebar_ActivateRow(pressed, point); }
         return 0;
     }
     if (message == WM_LBUTTONDBLCLK) { return 0; }
     if (message == WM_MOUSEMOVE || message == WM_MOUSELEAVE) {
-        HTREEITEM const hot = message == WM_MOUSELEAVE ? NULL : _Sidebar_RowAt(point);
+        HTREEITEM const hot = message == WM_MOUSELEAVE ? NULL : _Sidebar_RowAt(hwnd, point);
         if (s_hotItem != hot) { s_hotItem = hot; InvalidateRect(hwnd, NULL, FALSE); }
         if (message == WM_MOUSEMOVE) {
             TRACKMOUSEEVENT tracking = { sizeof(tracking), TME_LEAVE, hwnd, 0 };
@@ -153,6 +177,7 @@ static LRESULT CALLBACK _Sidebar_TreeProc(HWND hwnd, UINT message, WPARAM wParam
 // Tree deletion owns all metadata, without allocations.
 enum { SIDEBAR_FILE = 0, SIDEBAR_UNLOADED = 1, SIDEBAR_LOADED = 2, SIDEBAR_RECENT = 3, SIDEBAR_EMPTY = 4,
        SIDEBAR_RECENT_ITEM = 5, SIDEBAR_RECENT_EMPTY = 6,
+       SIDEBAR_RESULT = 7, SIDEBAR_RESULT_HEADER = 8, SIDEBAR_RESULT_EMPTY = 9, SIDEBAR_RESULT_CLEAR = 10,
        SIDEBAR_KIND_MASK = 15, SIDEBAR_COUNT_SHIFT = 4, SIDEBAR_COUNT_LIMIT = 1000, SIDEBAR_COUNT_FOLDERS = 256 };
 
 // Read native text and kind into the caller's explicit WCHAR capacity. Directory
@@ -405,6 +430,18 @@ static inline bool _Sidebar_IsBinary(LPCWSTR name)
 static inline int _Sidebar_MatchName(LPCWSTR name, LPCWSTR query)
 {
     return *query ? FindStringOrdinal(FIND_FROMSTART, name, -1, query, -1, TRUE) : 0;
+}
+
+// Use the same extension colors in the folder and result views. Non-file kinds
+// supply their group/empty-row colors; current-file capsules override afterward.
+static COLORREF _Sidebar_NameColor(LPCWSTR name, LPARAM kind)
+{
+    if (kind == SIDEBAR_UNLOADED || kind == SIDEBAR_LOADED) { return s_palette->folder; }
+    if (kind == SIDEBAR_EMPTY) { return s_palette->weak; }
+    if (_Sidebar_IsBinary(name)) { return s_palette->binary; }
+    if (!_wcsicmp(PathFindExtensionW(name), L".ini")) { return s_palette->ini; }
+    if (!_wcsicmp(PathFindExtensionW(name), L".h") || !_wcsicmp(PathFindExtensionW(name), L".c")) { return s_palette->source; }
+    return s_palette->text;
 }
 
 // Classify 96-DPI logical width: 0 shows all; 1 hides Editing, recent folder and
@@ -685,6 +722,175 @@ static inline bool _Sidebar_AbbreviateFolder(LPCWSTR root, LPCWSTR folder, LPWST
     return true;
 }
 
+// Cancel a scan and close every active enumerator. Result paths remain owned by
+// the result view until _Sidebar_FilterChanged deletes its rows and frees them.
+static void _Sidebar_StopScan(void)
+{
+    KillTimer(s_panel, SIDEBAR_FILTER_TIMER);
+    KillTimer(s_panel, SIDEBAR_SCAN_TIMER);
+    s_filterDue = 0;
+    while (s_scan) {
+        SidebarScan* parent = s_scan->parent;
+        if (s_scan->search != INVALID_HANDLE_VALUE) { FindClose(s_scan->search); }
+        Path_Release(s_scan->folder);
+        FreeMem(s_scan);
+        s_scan = parent;
+    }
+}
+
+// Insert native text for accessibility and navigation. The low bits identify a
+// presentation row; a result's upper bits index its separately owned full path.
+static HTREEITEM _Sidebar_InsertResult(LPCWSTR text, LPARAM kind, UINT index)
+{
+    TVINSERTSTRUCTW row = { 0 };
+    row.hParent = TVI_ROOT;
+    row.hInsertAfter = TVI_LAST;
+    row.item.mask = TVIF_TEXT | TVIF_PARAM | TVIF_INTEGRAL;
+    row.item.pszText = (LPWSTR)text;
+    row.item.lParam = kind | ((LPARAM)index << SIDEBAR_COUNT_SHIFT);
+    row.itemex.iIntegral = kind == SIDEBAR_RESULT_HEADER || kind == SIDEBAR_RESULT_EMPTY ? 3 : 2;
+    return TreeView_InsertItem(s_results, &row);
+}
+
+// Publish only the current query, after enumeration ends or hits a limit. There
+// is no cross-thread completion: query edits cancel the UI-owned timer state.
+// A pending scan intentionally has no "no match" row until it has finished.
+static void _Sidebar_PublishResults(void)
+{
+    SendMessage(s_results, WM_SETREDRAW, FALSE, 0);
+    TreeView_DeleteAllItems(s_results);
+    s_resultHot = s_resultPressed = NULL;
+    WCHAR text[MAX_PATH_EXPLICIT], format[128];
+    GetLngString(IDS_MUI_SIDEBAR_MATCH_COUNT, format, COUNTOF(format));
+    StringCchPrintf(text, COUNTOF(text), format, s_resultCount);
+    _Sidebar_InsertResult(text, SIDEBAR_RESULT_HEADER, 0);
+    for (UINT i = 0; i < s_resultCount; ++i) {
+        _Sidebar_InsertResult(Path_FindFileName(s_resultPaths[i]), SIDEBAR_RESULT, i);
+    }
+    if (!s_resultCount) {
+        GetLngString(IDS_MUI_SIDEBAR_NO_MATCH, format, COUNTOF(format));
+        StringCchPrintf(text, COUNTOF(text), format, s_query);
+        _Sidebar_InsertResult(text, SIDEBAR_RESULT_EMPTY, 0);
+        GetLngString(IDS_MUI_SIDEBAR_CLEAR_FILTER, text, COUNTOF(text));
+        _Sidebar_InsertResult(text, SIDEBAR_RESULT_CLEAR, 0);
+    }
+    SendMessage(s_results, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(s_results, NULL, FALSE);
+    if (s_filterAction) {
+        bool const open = s_filterAction == 2;
+        s_filterAction = 0;
+        _Sidebar_FirstResultKey(open);
+    }
+}
+
+// Push a directory with an unopened enumerator. Ownership of folder transfers
+// only on success; allocation failure leaves cleanup to the caller.
+static bool _Sidebar_PushScan(HPATHL folder)
+{
+    SidebarScan* frame = AllocMem(sizeof(*frame), HEAP_ZERO_MEMORY);
+    if (!frame) { return false; }
+    frame->folder = folder;
+    frame->search = INVALID_HANDLE_VALUE;
+    frame->parent = s_scan;
+    s_scan = frame;
+    return true;
+}
+
+// Display a localized Windows error for an incomplete scan, then release its
+// handles and publish the available results. Do not claim an allocation failure
+// was a successful full scan or a configured entry/result limit.
+static void _Sidebar_FailScan(DWORD error)
+{
+    WCHAR text[MAX_PATH_EXPLICIT];
+    if (FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, NULL, error, 0, text, COUNTOF(text), NULL)) {
+        _Sidebar_SetHint(text);
+    }
+    _Sidebar_StopScan();
+    _Sidebar_PublishResults();
+}
+
+// Reset results and debounce from the last text change/root refresh. The folder
+// tree, group rows, selection and expanded nodes are never rebuilt here.
+static void _Sidebar_FilterChanged(void)
+{
+    if (!s_results || !s_filter) { return; }
+    _Sidebar_StopScan();
+    s_filterAction = 0;
+    _Sidebar_SetHint(NULL);
+    TreeView_DeleteAllItems(s_results);
+    s_resultHot = s_resultPressed = NULL;
+    for (UINT i = 0; i < s_resultCount; ++i) { Path_Release(s_resultPaths[i]); }
+    s_resultCount = s_scanned = 0;
+    GetWindowTextW(s_filter, s_query, COUNTOF(s_query));
+    ShowWindow(s_tree, s_query[0] ? SW_HIDE : SW_SHOWNA);
+    ShowWindow(s_results, s_query[0] ? SW_SHOWNA : SW_HIDE);
+    if (s_query[0]) {
+        s_filterDue = GetTickCount64() + SIDEBAR_FILTER_DELAY;
+        if (!SetTimer(s_panel, SIDEBAR_FILTER_TIMER, SIDEBAR_FILTER_DELAY, NULL)) { _Sidebar_FailScan(GetLastError()); }
+    }
+    _Sidebar_LayoutChildren();
+}
+
+// Enumerate at most 64 entries or six milliseconds per UI timer slice. Each
+// entry, including hidden/system ones, consumes the 20000-entry budget. Reparse
+// directories are not followed: junction cycles must not escape the chosen root
+// or consume the whole budget. FindNext/open failures retain an explicit hint.
+static void _Sidebar_ScanBatch(void)
+{
+    if (!s_scan) { return; }
+    ULONGLONG const started = GetTickCount64();
+    UINT limitHint = 0;
+    for (UINT batch = 0; s_scan && batch < SIDEBAR_SCAN_BATCH && GetTickCount64() - started < SIDEBAR_SCAN_BUDGET_MS; ++batch) {
+        WIN32_FIND_DATAW entry;
+        bool found;
+        if (s_scan->search == INVALID_HANDLE_VALUE) {
+            HPATHL pattern = Path_Copy(s_scan->folder);
+            Path_Append(pattern, L"*");
+            s_scan->search = Path_FindFirstFile(pattern, &entry);
+            DWORD const error = GetLastError();
+            Path_Release(pattern);
+            found = s_scan->search != INVALID_HANDLE_VALUE;
+            if (!found && error != ERROR_FILE_NOT_FOUND) { _Sidebar_FailScan(error); return; }
+        } else {
+            found = FindNextFileW(s_scan->search, &entry) != FALSE;
+            if (!found && GetLastError() != ERROR_NO_MORE_FILES) { _Sidebar_FailScan(GetLastError()); return; }
+        }
+        if (!found) {
+            SidebarScan* parent = s_scan->parent;
+            if (s_scan->search != INVALID_HANDLE_VALUE) { FindClose(s_scan->search); }
+            Path_Release(s_scan->folder);
+            FreeMem(s_scan);
+            s_scan = parent;
+            continue;
+        }
+        if (!wcscmp(entry.cFileName, L".") || !wcscmp(entry.cFileName, L"..")) { continue; }
+        if (s_scanned == SIDEBAR_SCAN_LIMIT) { limitHint = IDS_MUI_SIDEBAR_SCAN_LIMIT; break; }
+        ++s_scanned;
+        if (!Settings.SidebarShowHidden && (entry.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM))) { continue; }
+        bool const directory = (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        if (directory && (entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) { continue; }
+        if (!directory && _Sidebar_MatchName(entry.cFileName, s_query) < 0) { continue; }
+        if (!directory && s_resultCount == SIDEBAR_RESULT_LIMIT) { limitHint = IDS_MUI_SIDEBAR_RESULT_LIMIT; break; }
+        HPATHL path = Path_Copy(s_scan->folder);
+        Path_Append(path, entry.cFileName);
+        if (directory) {
+            if (!_Sidebar_PushScan(path)) { Path_Release(path); _Sidebar_FailScan(ERROR_NOT_ENOUGH_MEMORY); return; }
+        } else {
+            s_resultPaths[s_resultCount++] = path;
+        }
+    }
+    if (limitHint || !s_scan) {
+        _Sidebar_StopScan();
+        _Sidebar_PublishResults();
+        if (limitHint) {
+            WCHAR format[128], text[256];
+            GetLngString(limitHint, format, COUNTOF(format));
+            StringCchPrintf(text, COUNTOF(text), format, limitHint == IDS_MUI_SIDEBAR_SCAN_LIMIT ? SIDEBAR_SCAN_LIMIT : SIDEBAR_RESULT_LIMIT);
+            _Sidebar_SetHint(text);
+        }
+    }
+}
+
 // Resolve a path below the current root, expanding ancestors only as needed.
 // When refreshMissing is true, retry a missing child once in its loaded parent.
 static HTREEITEM _Sidebar_FindPath(const HPATHL path, bool refreshMissing)
@@ -878,6 +1084,7 @@ void Sidebar_SetRoot(const HPATHL folder)
     }
     Path_Release(normalized);
     _Sidebar_UpdateChrome();
+    if (s_query[0]) { _Sidebar_FilterChanged(); }
 }
 
 void Sidebar_SyncToFile(const HPATHL file, bool fileOpened)
@@ -885,6 +1092,12 @@ void Sidebar_SyncToFile(const HPATHL file, bool fileOpened)
     if (s_panel) { InvalidateRect(s_panel, NULL, FALSE); }
     if (fileOpened && Path_IsNotEmpty(file) && _Sidebar_IsRecentHidden(Path_Get(file))) { _Sidebar_ChangeRecentHidden(Path_Get(file), false); }
     _Sidebar_RefreshRecent();
+    if (s_query[0]) {
+        // FileLoad synchronizes here too. Searching/opening a result must leave
+        // the hidden folder tree intact, even when the file was never expanded.
+        InvalidateRect(s_results, NULL, FALSE);
+        return;
+    }
     if (!s_tree || !Settings.ShowSidebar || !s_folders) {
         return;
     }
@@ -1197,18 +1410,173 @@ static void _Sidebar_NewFile(void)
 
 // Return the visible row at a client point, including blank space to its right.
 // Only visible rows are inspected; outside the tree's client rectangle yields NULL.
-static HTREEITEM _Sidebar_RowAt(POINT point)
+static HTREEITEM _Sidebar_RowAt(HWND tree, POINT point)
 {
     RECT client;
-    GetClientRect(s_tree, &client);
+    GetClientRect(tree, &client);
     if (!PtInRect(&client, point)) { return NULL; }
-    for (HTREEITEM item = TreeView_GetFirstVisible(s_tree); item; item = TreeView_GetNextVisible(s_tree, item)) {
+    for (HTREEITEM item = TreeView_GetFirstVisible(tree); item; item = TreeView_GetNextVisible(tree, item)) {
         RECT row;
-        if (!TreeView_GetItemRect(s_tree, item, &row, FALSE)) { break; }
+        if (!TreeView_GetItemRect(tree, item, &row, FALSE)) { break; }
         if (row.top > point.y) { break; }
         if (row.bottom > point.y) { return item; }
     }
     return NULL;
+}
+
+// Open a stored full path through the same save/cancel policy as folder rows.
+// The clear action returns focus before hiding its own control. Binary results
+// remain selected and never reach FileLoad, for both mouse and keyboard callers.
+static void _Sidebar_ActivateResult(HTREEITEM item)
+{
+    TVITEMW row = { 0 };
+    row.mask = TVIF_PARAM;
+    row.hItem = item;
+    if (!TreeView_GetItem(s_results, &row)) { return; }
+    LPARAM const kind = row.lParam & SIDEBAR_KIND_MASK;
+    if (kind == SIDEBAR_RESULT_CLEAR) {
+        SetFocus(s_filter);
+        SetWindowTextW(s_filter, L"");
+    } else if (kind == SIDEBAR_RESULT) {
+        UINT const index = (UINT)(row.lParam >> SIDEBAR_COUNT_SHIFT);
+        if (index < s_resultCount && !_Sidebar_IsBinary(Path_FindFileName(s_resultPaths[index]))) {
+            _Sidebar_OpenFile(s_resultPaths[index]);
+        }
+    }
+}
+
+// Defer Down/Enter until the current debounced scan completes. Fast typing then
+// Enter must open the new query's first result, never a row from an older query.
+static void _Sidebar_FirstResultKey(bool open)
+{
+    if (!s_query[0]) { return; }
+    if (s_filterDue || s_scan) { s_filterAction = open ? 2 : 1; return; }
+    HTREEITEM const header = TreeView_GetRoot(s_results);
+    HTREEITEM const first = header ? TreeView_GetNextSibling(s_results, header) : NULL;
+    if (first && s_resultCount) {
+        TreeView_SelectItem(s_results, first);
+        if (open) { _Sidebar_ActivateResult(first); }
+        else { SetFocus(s_results); }
+    }
+}
+
+// The second native tree shares full-row hit testing and painting with the
+// folder tree, but has no directory/group activation or lazy-load notifications.
+static LRESULT CALLBACK _Sidebar_ResultProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR id, DWORD_PTR data)
+{
+    UNREFERENCED_PARAMETER(id);
+    UNREFERENCED_PARAMETER(data);
+    POINT const point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+    if (message == WM_LBUTTONDOWN || message == WM_RBUTTONDOWN || message == WM_MBUTTONDOWN || message == WM_KEYDOWN || message == WM_SYSKEYDOWN) { _Sidebar_SetHint(NULL); }
+    if (message == WM_LBUTTONDOWN) {
+        SetFocus(hwnd);
+        s_resultPressed = _Sidebar_RowAt(hwnd, point);
+        if (s_resultPressed) { TreeView_SelectItem(hwnd, s_resultPressed); }
+        return 0;
+    }
+    if (message == WM_LBUTTONUP) {
+        HTREEITEM const pressed = s_resultPressed;
+        s_resultPressed = NULL;
+        if (pressed && pressed == _Sidebar_RowAt(hwnd, point)) { _Sidebar_ActivateResult(pressed); }
+        return 0;
+    }
+    if (message == WM_LBUTTONDBLCLK) { return 0; }
+    if (message == WM_MOUSEMOVE || message == WM_MOUSELEAVE) {
+        HTREEITEM const hot = message == WM_MOUSELEAVE ? NULL : _Sidebar_RowAt(hwnd, point);
+        if (s_resultHot != hot) { s_resultHot = hot; InvalidateRect(hwnd, NULL, FALSE); }
+        if (message == WM_MOUSEMOVE) {
+            TRACKMOUSEEVENT tracking = { sizeof(tracking), TME_LEAVE, hwnd, 0 };
+            TrackMouseEvent(&tracking);
+        }
+    }
+    if (message == WM_NCDESTROY) {
+        RemoveWindowSubclass(hwnd, _Sidebar_ResultProc, 0);
+        s_results = NULL;
+    }
+    return DefSubclassProc(hwnd, message, wParam, lParam);
+}
+
+// Paint result metadata without filesystem access. Names and folder labels use
+// the same font-run measurement, row surfaces and clipping as folder-tree rows.
+// Highlight fill is the opaque 20-percent accent blend over that row's surface.
+static void _Sidebar_DrawResultRow(NMTVCUSTOMDRAW* draw)
+{
+    if (!s_drawing) { return; }
+    HTREEITEM const item = (HTREEITEM)draw->nmcd.dwItemSpec;
+    WCHAR name[MAX_PATH_EXPLICIT];
+    TVITEMW value = { 0 };
+    value.mask = TVIF_TEXT | TVIF_PARAM;
+    value.hItem = item;
+    value.pszText = name;
+    value.cchTextMax = COUNTOF(name);
+    if (!TreeView_GetItem(s_results, &value)) { return; }
+    RECT row, client;
+    GetClientRect(s_results, &client);
+    if (!TreeView_GetItemRect(s_results, item, &row, FALSE)) { return; }
+    row.left = 0;
+    row.right = client.right;
+    HDC const dc = draw->nmcd.hdc;
+    int const saved = SaveDC(dc);
+    IntersectClipRect(dc, row.left, row.top, row.right, row.bottom);
+    SidebarPalette const* p = s_palette;
+    SetDCBrushColor(dc, p->island);
+    FillRect(dc, &row, GetStockObject(DC_BRUSH));
+    LPARAM const kind = value.lParam & SIDEBAR_KIND_MASK;
+    bool const actionable = kind == SIDEBAR_RESULT || kind == SIDEBAR_RESULT_CLEAR;
+    COLORREF const surface = actionable && item == TreeView_GetSelection(s_results) ? p->selected :
+                             (actionable && item == s_resultHot ? p->rowHot : p->island);
+    if (surface != p->island) { SidebarDrawing_RoundRect(dc, row, _Sidebar_Pixels(7), Sidebar_GetStrokeWidth(s_dpi), surface, CLR_INVALID); }
+    RECT text = row;
+    text.left += _Sidebar_Pixels(10);
+    text.right -= _Sidebar_Pixels(10);
+    if (kind != SIDEBAR_RESULT) {
+        SidebarDrawing_Text(dc, s_drawing, name, SidebarFontSmall, text, kind == SIDEBAR_RESULT_CLEAR ? p->accent : p->secondary);
+    } else {
+        UINT const index = (UINT)(value.lParam >> SIDEBAR_COUNT_SHIFT);
+        if (index < s_resultCount) {
+            HPATHL folder = Path_Copy(s_resultPaths[index]);
+            Path_RemoveFileSpec(folder);
+            WCHAR abbreviated[MAX_PATH_EXPLICIT];
+            if (_Sidebar_AbbreviateFolder(Path_Get(Settings.SidebarFolder), Path_Get(folder), abbreviated, COUNTOF(abbreviated))) {
+                int const folderWidth = min_i((text.right - text.left) / 2, SidebarDrawing_Measure(dc, s_drawing, abbreviated, SidebarFontSmall));
+                RECT where = text;
+                where.left = where.right - folderWidth;
+                SidebarDrawing_Text(dc, s_drawing, abbreviated, SidebarFontSmall, where, p->weak);
+                text.right = max_i(text.left, where.left - _Sidebar_Pixels(10));
+            }
+            Path_Release(folder);
+            SidebarDrawing_Text(dc, s_drawing, name, SidebarFontBody, text, _Sidebar_NameColor(name, SIDEBAR_FILE));
+            int const match = _Sidebar_MatchName(name, s_query);
+            if (match >= 0) {
+                WCHAR const first = name[match];
+                name[match] = L'\0';
+                int const before = SidebarDrawing_Measure(dc, s_drawing, name, SidebarFontBody);
+                name[match] = first;
+                size_t const end = match + wcslen(s_query);
+                WCHAR const after = name[end];
+                name[end] = L'\0';
+                int const matchWidth = SidebarDrawing_Measure(dc, s_drawing, name + match, SidebarFontBody);
+                name[end] = after;
+                RECT highlight = text;
+                highlight.left += before;
+                highlight.right = highlight.left + matchWidth;
+                highlight.top += _Sidebar_Pixels(3);
+                highlight.bottom -= _Sidebar_Pixels(3);
+                // Leave the existing trailing ellipsis intact when text clips.
+                int const fullWidth = SidebarDrawing_Measure(dc, s_drawing, name, SidebarFontBody);
+                int const clipRight = text.right - (fullWidth > text.right - text.left ? SidebarDrawing_Measure(dc, s_drawing, L"\x2026", SidebarFontBody) : 0);
+                IntersectClipRect(dc, text.left, text.top, max_i(text.left, clipRight), text.bottom);
+                COLORREF const blend = RGB((GetRValue(p->accent) + 4 * GetRValue(surface)) / 5,
+                                           (GetGValue(p->accent) + 4 * GetGValue(surface)) / 5,
+                                           (GetBValue(p->accent) + 4 * GetBValue(surface)) / 5);
+                SidebarDrawing_RoundRect(dc, highlight, _Sidebar_Pixels(3), Sidebar_GetStrokeWidth(s_dpi), blend, CLR_INVALID);
+                name[end] = L'\0';
+                RECT matchBounds = { highlight.left, text.top, highlight.right, text.bottom };
+                SidebarDrawing_Text(dc, s_drawing, name + match, SidebarFontBody, matchBounds, p->accent);
+            }
+        }
+    }
+    RestoreDC(dc, saved);
 }
 
 // Keep the hover action after the group title at every width/DPI. Return empty
@@ -1296,16 +1664,6 @@ static void _Sidebar_ActivateRow(HTREEITEM item, POINT point)
     InvalidateRect(s_tree, NULL, FALSE);
 }
 
-// Use one extension palette for tree files and recent rows; directory and
-// current-file styles are applied by the respective row renderer.
-static COLORREF _Sidebar_FileColor(LPCWSTR name)
-{
-    if (_Sidebar_IsBinary(name)) { return s_palette->binary; }
-    if (!_wcsicmp(PathFindExtensionW(name), L".ini")) { return s_palette->ini; }
-    if (!_wcsicmp(PathFindExtensionW(name), L".h") || !_wcsicmp(PathFindExtensionW(name), L".c")) { return s_palette->source; }
-    return s_palette->text;
-}
-
 // Draw a recent file as an aligned numbered row, without the tree's current-file
 // capsule. name is its canonical path; text is the clipped tree-client bounds.
 // The cached current handle avoids filesystem/path work for current-file checks.
@@ -1347,13 +1705,14 @@ static void _Sidebar_DrawRecentRow(HDC dc, HTREEITEM item, LPCWSTR name, RECT te
         Path_Release(folder);
     }
     SidebarDrawing_Text(dc, s_drawing, PathFindFileNameW(name), current ? SidebarFontBold : SidebarFontBody,
-                        text, current ? p->accent : _Sidebar_FileColor(name));
+                        text, current ? p->accent : _Sidebar_NameColor(name, SIDEBAR_FILE));
 }
 
 // Paint one complete row using cached metadata only. Names remain native item
 // text for navigation/accessibility; prefixes, counts and states are presentation.
 static void _Sidebar_DrawRow(NMTVCUSTOMDRAW* draw)
 {
+    if (draw->nmcd.hdr.hwndFrom == s_results) { _Sidebar_DrawResultRow(draw); return; }
     HTREEITEM const item = (HTREEITEM)draw->nmcd.dwItemSpec;
     WCHAR name[MAX_PATH_EXPLICIT];
     LPARAM kind;
@@ -1435,10 +1794,8 @@ static void _Sidebar_DrawRow(NMTVCUSTOMDRAW* draw)
         }
         FreeMem(prefix);
         FreeMem(ancestors);
-        COLORREF color = _Sidebar_FileColor(name);
+        COLORREF color = _Sidebar_NameColor(name, kind);
         bool const directory = kind == SIDEBAR_UNLOADED || kind == SIDEBAR_LOADED;
-        if (directory) { color = p->folder; }
-        else if (kind == SIDEBAR_EMPTY) { color = p->weak; }
         if (current) {
             WCHAR editing[128];
             GetLngString(IDS_MUI_SIDEBAR_EDITING, editing, COUNTOF(editing));
@@ -1474,7 +1831,7 @@ static void _Sidebar_DrawRow(NMTVCUSTOMDRAW* draw)
 // errors cancel the native operation; every deleted handle loses cached state.
 static LRESULT _Sidebar_OnNotify(const NMHDR* notification)
 {
-    if (notification->hwndFrom != s_tree) {
+    if (notification->hwndFrom != s_tree && notification->hwndFrom != s_results) {
         return 0;
     }
     if (notification->code == NM_CUSTOMDRAW) {
@@ -1484,6 +1841,8 @@ static LRESULT _Sidebar_OnNotify(const NMHDR* notification)
             _Sidebar_DrawRow(draw);
             return CDRF_SKIPDEFAULT;
         }
+    } else if (notification->hwndFrom == s_results) {
+        return 0;
     } else if (notification->code == TVN_DELETEITEMW) {
         HTREEITEM const item = ((NMTREEVIEWW const*)notification)->itemOld.hItem;
         if (s_currentItem == item) { s_currentItem = NULL; }
@@ -1528,6 +1887,8 @@ static void _Sidebar_LayoutChildren(void)
     s_newRect = s_refreshRect;
     OffsetRect(&s_newRect, -diameter - _Sidebar_Pixels(6), 0);
     s_filterRect = (RECT){ pad, _Sidebar_Pixels(72), max_i(pad, client.right - pad), _Sidebar_Pixels(106) };
+    s_clearRect = s_filterRect;
+    s_clearRect.left = max_i(s_clearRect.left, s_clearRect.right - _Sidebar_Pixels(34));
     int const statusTop = max_i(0, client.bottom - _Sidebar_Pixels(30));
     WCHAR sort[128];
     GetLngString(_Sidebar_SortLabelId(), sort, COUNTOF(sort));
@@ -1542,11 +1903,16 @@ static void _Sidebar_LayoutChildren(void)
         int const editLeft = s_filterRect.left + _Sidebar_Pixels(32);
         int const editHeight = max_i(0, min_i(_Sidebar_Pixels(22), statusTop - _Sidebar_Pixels(78)));
         SetWindowPos(s_filter, NULL, editLeft, _Sidebar_Pixels(78),
-                     max_i(0, s_filterRect.right - editLeft - _Sidebar_Pixels(12)), editHeight, SWP_NOZORDER | SWP_NOACTIVATE);
+                     max_i(0, (s_query[0] ? s_clearRect.left : s_filterRect.right - _Sidebar_Pixels(12)) - editLeft), editHeight, SWP_NOZORDER | SWP_NOACTIVATE);
     }
     if (s_tree) {
         int const treeTop = _Sidebar_Pixels(116);
         SetWindowPos(s_tree, NULL, _Sidebar_Pixels(8), treeTop, max_i(0, client.right - _Sidebar_Pixels(16)),
+                     max_i(0, statusTop - treeTop - _Sidebar_Pixels(8)), SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    if (s_results) {
+        int const treeTop = _Sidebar_Pixels(116);
+        SetWindowPos(s_results, NULL, _Sidebar_Pixels(8), treeTop, max_i(0, client.right - _Sidebar_Pixels(16)),
                      max_i(0, statusTop - treeTop - _Sidebar_Pixels(8)), SWP_NOZORDER | SWP_NOACTIVATE);
     }
     if (s_tooltip) {
@@ -1584,8 +1950,8 @@ static bool _Sidebar_ToggleFooter(POINT point)
     return true;
 }
 
-// Root-dependent cue and availability use existing resources. T7 owns matching;
-// the EDIT remains a native text editor until that logic is integrated.
+// Root-dependent cue and availability use existing resources. Matching reads the
+// same canonical root, while the EDIT keeps native caret and clipboard behavior.
 static void _Sidebar_UpdateChrome(void)
 {
     if (!s_panel || !s_filter) { return; }
@@ -1682,14 +2048,37 @@ static void _Sidebar_Paint(HDC dc)
     slash.left += _Sidebar_Pixels(14);
     slash.right = slash.left + _Sidebar_Pixels(12);
     SidebarDrawing_Text(dc, s_drawing, L"/", SidebarFontBold, slash, p->accent);
+    if (s_query[0]) {
+        RECT clear = s_clearRect;
+        clear.left += _Sidebar_Pixels(8);
+        clear.right -= _Sidebar_Pixels(8);
+        SidebarDrawing_Text(dc, s_drawing, L"\x00d7", SidebarFontBody, clear, p->secondary);
+    }
 }
 
-// Panel messages terminate tree notifications here, before the main window's
-// editor notification guard. Resource release occurs after child destruction.
+// Panel messages terminate tree notifications before the main editor's guard.
+// Destruction stops scan timers/handles; drawing resources outlive the children.
 static LRESULT CALLBACK _Sidebar_PanelProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     _Sidebar_ClearHintForInput(message);
     switch (message) {
+    case WM_TIMER:
+        if (wParam == SIDEBAR_FILTER_TIMER) {
+            // A queued old timer message must not bypass a new 200ms debounce.
+            if (!s_filterDue || GetTickCount64() < s_filterDue || !s_query[0]) { return 0; }
+            KillTimer(hwnd, SIDEBAR_FILTER_TIMER);
+            s_filterDue = 0;
+            if (Path_IsExistingDirectory(Settings.SidebarFolder)) {
+                HPATHL root = Path_Copy(Settings.SidebarFolder);
+                if (!_Sidebar_PushScan(root)) { Path_Release(root); _Sidebar_FailScan(ERROR_NOT_ENOUGH_MEMORY); return 0; }
+                if (!SetTimer(hwnd, SIDEBAR_SCAN_TIMER, 10, NULL)) { _Sidebar_FailScan(GetLastError()); return 0; }
+            } else {
+                _Sidebar_PublishResults();
+            }
+        } else if (wParam == SIDEBAR_SCAN_TIMER) {
+            _Sidebar_ScanBatch();
+        }
+        return 0;
     case WM_ERASEBKGND:
         return TRUE;
     case WM_PAINT: {
@@ -1733,7 +2122,10 @@ static LRESULT CALLBACK _Sidebar_PanelProc(HWND hwnd, UINT message, WPARAM wPara
         }
         return _Sidebar_OnNotify((NMHDR*)lParam);
     case WM_COMMAND:
-        if ((HWND)lParam == s_filter && HIWORD(wParam) == EN_CHANGE && *s_hint) { _Sidebar_SetHint(NULL); }
+        if ((HWND)lParam == s_filter && HIWORD(wParam) == EN_CHANGE) {
+            _Sidebar_SetHint(NULL);
+            _Sidebar_FilterChanged();
+        }
         if ((HWND)lParam == s_filter && (HIWORD(wParam) == EN_SETFOCUS || HIWORD(wParam) == EN_KILLFOCUS)) {
             InvalidateRect(hwnd, &s_filterRect, FALSE);
             InvalidateRect(s_filter, NULL, TRUE);
@@ -1763,13 +2155,28 @@ static LRESULT CALLBACK _Sidebar_PanelProc(HWND hwnd, UINT message, WPARAM wPara
         InvalidateRect(hwnd, NULL, FALSE);
         return 0;
     case WM_LBUTTONDOWN: {
+        _Sidebar_SetHint(NULL);
         POINT const point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         if (_Sidebar_ToggleFooter(point)) { return 0; }
         if (PtInRect(&s_newRect, point)) { _Sidebar_NewFile(); }
         else if (PtInRect(&s_refreshRect, point)) { Sidebar_Refresh(); }
-        else if (PtInRect(&s_filterRect, point) && IsWindowEnabled(s_filter)) { SetFocus(s_filter); }
+        else if (PtInRect(&s_filterRect, point) && IsWindowEnabled(s_filter)) {
+            SetFocus(s_filter);
+            if (s_query[0] && PtInRect(&s_clearRect, point)) { SetWindowTextW(s_filter, L""); }
+        }
         return 0;
     }
+    case WM_RBUTTONDOWN:
+    case WM_MBUTTONDOWN:
+    case WM_KEYDOWN:
+    case WM_SYSKEYDOWN:
+        _Sidebar_SetHint(NULL);
+        break;
+    case WM_DESTROY:
+        _Sidebar_StopScan();
+        for (UINT i = 0; i < s_resultCount; ++i) { Path_Release(s_resultPaths[i]); }
+        s_resultCount = 0;
+        break;
     case WM_NCDESTROY:
         s_panel = s_filter = s_tooltip = NULL;
         SidebarDrawing_Destroy(s_drawing);
@@ -1822,14 +2229,19 @@ bool Sidebar_Create(HWND parent)
                            WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TVS_FULLROWSELECT | TVS_TRACKSELECT |
                            TVS_NONEVENHEIGHT | TVS_NOHSCROLL | TVS_SHOWSELALWAYS | TVS_DISABLEDRAGDROP,
                            0, 0, 0, 0, s_panel, (HMENU)IDC_SIDEBAR_TREE, Globals.hInstance, NULL);
+    s_results = CreateWindowEx(0, WC_TREEVIEW, NULL,
+                              WS_CHILD | WS_CLIPSIBLINGS | TVS_FULLROWSELECT | TVS_TRACKSELECT | TVS_NONEVENHEIGHT |
+                              TVS_NOHSCROLL | TVS_SHOWSELALWAYS | TVS_DISABLEDRAGDROP,
+                              0, 0, 0, 0, s_panel, (HMENU)2, Globals.hInstance, NULL);
     s_filter = CreateWindowEx(0, WC_EDIT, NULL, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                              0, 0, 0, 0, s_panel, (HMENU)1, Globals.hInstance, NULL);
     s_tooltip = CreateWindowEx(WS_EX_TOPMOST, TOOLTIPS_CLASS, NULL, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
                               CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, s_panel, NULL, Globals.hInstance, NULL);
     s_splitter = CreateWindowEx(0, WC_STATIC, NULL, WS_CHILD | WS_CLIPSIBLINGS,
                                0, 0, 0, 0, parent, (HMENU)IDC_SIDEBAR_SPLIT, Globals.hInstance, NULL);
-    if (!s_tree || !s_filter || !s_tooltip || !s_splitter || !SetWindowSubclass(s_splitter, _Sidebar_SplitterProc, 0, 0) ||
-        !SetWindowSubclass(s_tree, _Sidebar_TreeProc, 0, 0) || !SetWindowSubclass(s_filter, _Sidebar_FilterProc, 0, 0)) {
+    if (!s_tree || !s_results || !s_filter || !s_tooltip || !s_splitter || !SetWindowSubclass(s_splitter, _Sidebar_SplitterProc, 0, 0) ||
+        !SetWindowSubclass(s_tree, _Sidebar_TreeProc, 0, 0) || !SetWindowSubclass(s_results, _Sidebar_ResultProc, 0, 0) ||
+        !SetWindowSubclass(s_filter, _Sidebar_FilterProc, 0, 0)) {
         DestroyWindow(s_panel);
         if (s_splitter) { DestroyWindow(s_splitter); }
         s_tree = s_splitter = NULL;
@@ -1854,6 +2266,10 @@ bool Sidebar_Create(HWND parent)
     InitWindowCommon(s_tree, true);
     InitTreeView(s_tree);
     TreeView_SetExtendedStyle(s_tree, TVS_EX_DOUBLEBUFFER, TVS_EX_DOUBLEBUFFER);
+    InitWindowCommon(s_results, true);
+    InitTreeView(s_results);
+    TreeView_SetExtendedStyle(s_results, TVS_EX_DOUBLEBUFFER, TVS_EX_DOUBLEBUFFER);
+    SendMessage(s_filter, EM_LIMITTEXT, COUNTOF(s_query) - 1, 0);
     Sidebar_OnThemeChanged();
     // Root restoration is deferred until after startup's FileLoad.
     _Sidebar_UpdateChrome();
@@ -1871,16 +2287,63 @@ bool Sidebar_PreTranslateMessage(MSG* message)
     if (message->hwnd == s_filter && message->message >= WM_KEYFIRST && message->message <= WM_KEYLAST &&
         GetKeyState(VK_MENU) >= 0) {
         bool const control = GetKeyState(VK_CONTROL) < 0;
-        if (!control || message->message == WM_CHAR || message->wParam == 'A' || message->wParam == 'C' || message->wParam == 'V' ||
-            message->wParam == 'X' || message->wParam == 'Z') {
-            if (!control && message->message == WM_KEYDOWN && (message->wParam == VK_ESCAPE || message->wParam == VK_TAB)) {
-                SetFocus(Globals.hwndEdit);
-                return true;
+        bool const editing = message->wParam == 'A' || message->wParam == 'C' || message->wParam == 'V' ||
+                             message->wParam == 'X' || message->wParam == 'Z' || message->wParam == VK_INSERT ||
+                             message->wParam == VK_DELETE || message->wParam == VK_BACK ||
+                             message->wParam == VK_LEFT || message->wParam == VK_RIGHT ||
+                             message->wParam == VK_HOME || message->wParam == VK_END;
+        if (!control || message->message == WM_CHAR || editing) {
+            if (message->message == WM_KEYDOWN) {
+                _Sidebar_SetHint(NULL);
+                if (control && message->wParam == 'A') {
+                    // Select in EDIT before a main-window accelerator can select
+                    // the document. The other editing keys retain native handling.
+                    SendMessage(s_filter, EM_SETSEL, 0, -1);
+                    return true;
+                }
+                if (!control) {
+                    switch (message->wParam) {
+                    case VK_ESCAPE:
+                        if (s_query[0]) { SetWindowTextW(s_filter, L""); }
+                        else { SetFocus(Globals.hwndEdit); }
+                        return true;
+                    case VK_TAB:
+                        SetFocus(Globals.hwndEdit);
+                        return true;
+                    case VK_DOWN:
+                    case VK_RETURN:
+                        _Sidebar_FirstResultKey(message->wParam == VK_RETURN);
+                        return true;
+                    }
+                }
             }
             TranslateMessage(message);
             DispatchMessage(message);
             return true;
         }
+    }
+    if (message->hwnd == s_results && message->message >= WM_KEYFIRST && message->message <= WM_KEYLAST &&
+        GetKeyState(VK_CONTROL) >= 0 && GetKeyState(VK_MENU) >= 0) {
+        if (message->message == WM_KEYDOWN) {
+            _Sidebar_SetHint(NULL);
+            switch (message->wParam) {
+            case VK_RETURN:
+                _Sidebar_ActivateResult(TreeView_GetSelection(s_results));
+                return true;
+            case VK_ESCAPE:
+                SetFocus(s_filter);
+                return true;
+            case VK_TAB:
+                SetFocus(Globals.hwndEdit);
+                return true;
+            case VK_F5:
+                Sidebar_Refresh();
+                return true;
+            }
+        }
+        TranslateMessage(message);
+        DispatchMessage(message);
+        return true;
     }
     if (!s_tree || message->hwnd != s_tree || message->message < WM_KEYFIRST ||
         message->message > WM_KEYLAST || GetKeyState(VK_CONTROL) < 0 || GetKeyState(VK_MENU) < 0) {
@@ -1959,6 +2422,7 @@ void Sidebar_OnThemeChanged(void)
         s_drawing = replacement;
         SendMessage(s_filter, WM_SETFONT, (WPARAM)SidebarDrawing_EditFont(s_drawing), TRUE);
         SendMessage(s_tree, WM_SETFONT, (WPARAM)SidebarDrawing_EditFont(s_drawing), FALSE);
+        SendMessage(s_results, WM_SETFONT, (WPARAM)SidebarDrawing_EditFont(s_drawing), FALSE);
         SidebarDrawing_Destroy(previous);
     }
     // Match the style dialog: let the existing subclass update colors and redraw.
@@ -1967,9 +2431,15 @@ void Sidebar_OnThemeChanged(void)
     TreeView_SetTextColor(s_tree, s_palette->text);
     TreeView_SetItemHeight(s_tree, _Sidebar_Pixels(12));
     TreeView_SetIndent(s_tree, 0);
+    SendMessage(s_results, WM_THEMECHANGED, 0, 0);
+    TreeView_SetBkColor(s_results, s_palette->island);
+    TreeView_SetTextColor(s_results, s_palette->text);
+    TreeView_SetItemHeight(s_results, _Sidebar_Pixels(12));
+    TreeView_SetIndent(s_results, 0);
 #ifdef D_NP3_WIN10_DARK_MODE
     AllowDarkModeForWindowEx(s_tree, UseDarkMode());
     AllowDarkModeForWindowEx(s_splitter, UseDarkMode());
+    AllowDarkModeForWindowEx(s_results, UseDarkMode());
 #endif
     _Sidebar_UpdateChrome();
     _Sidebar_LayoutChildren();
