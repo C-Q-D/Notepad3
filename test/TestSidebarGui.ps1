@@ -2,7 +2,7 @@
 # The AHK assertions use messages addressed to the test window, never global input.
 param(
     [ValidateSet('A','B','C','D','E','F')][string]$Through = 'F',
-    [ValidateSet('All','C','D','E','F')][string]$Scenario = 'All',
+    [ValidateSet('All','C','D','E','F','LongPath')][string]$Scenario = 'All',
     [ValidateSet('Light','Dark')][string]$Theme = 'Light',
     [string]$ScreenshotDirectory = '',
     [string]$Executable = (Join-Path $PSScriptRoot '..\Bin\Release_x64_v143\Notepad3.exe')
@@ -10,6 +10,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $temp = Join-Path $env:TEMP ('np3-sidebar-L1-gui-' + [guid]::NewGuid())
 $runner = $null
+$runnerCreated = 0
 $stdoutTask = $null
 $stderrTask = $null
 [void](New-Item -ItemType Directory -Path $temp)
@@ -46,23 +47,35 @@ PreferredLanguageLocaleName=en-US
         [void]$info.ArgumentList.Add($argument)
     }
     $runner = [Diagnostics.Process]::Start($info)
+    $runnerCreated = $runner.StartTime.ToFileTimeUtc()
     $stdoutTask = $runner.StandardOutput.ReadToEndAsync()
     $stderrTask = $runner.StandardError.ReadToEndAsync()
     if (!$runner.WaitForExit(120000)) { throw 'Sidebar GUI runner timed out after 120 seconds' }
     if ($runner.ExitCode -ne 0) { throw "Sidebar GUI assertions failed (exit $($runner.ExitCode))" }
 } finally {
-    # PID ownership is verified against the unique copied executable before cleanup.
+    # Verify the PID, creation FILETIME and unique executable path before cleanup.
     $pidFile = Join-Path $temp 'pids.txt'
     if (Test-Path -LiteralPath $pidFile) {
-        foreach ($testPid in (Get-Content -LiteralPath $pidFile)) {
+        foreach ($identity in (Get-Content -LiteralPath $pidFile)) {
+            $testPid, $created = $identity.Split('|')
             $process = Get-Process -Id ([int]$testPid) -ErrorAction SilentlyContinue
-            if ($process -and $process.Path -eq (Join-Path $temp 'Notepad3.exe')) {
+            if ($process -and $process.StartTime.ToFileTimeUtc() -eq [long]$created -and
+                $process.Path -eq (Join-Path $temp 'Notepad3.exe')) {
                 [void]$process.CloseMainWindow()
-                if (!$process.WaitForExit(2000)) { $process.Kill(); $process.WaitForExit() }
+                if (!$process.WaitForExit(2000)) {
+                    $process.Refresh()
+                    if ($process.StartTime.ToFileTimeUtc() -ne [long]$created) { throw 'Test process identity changed before kill' }
+                    $process.Kill()
+                    $process.WaitForExit()
+                }
             }
         }
     }
-    if ($runner -and !$runner.HasExited) { $runner.Kill(); $runner.WaitForExit() }
+    if ($runner -and !$runner.HasExited) {
+        if ($runner.StartTime.ToFileTimeUtc() -ne $runnerCreated) { throw 'AHK runner identity changed before kill' }
+        $runner.Kill()
+        $runner.WaitForExit()
+    }
     if ($stdoutTask) { $stdoutTask.GetAwaiter().GetResult() }
     if ($stderrTask) { $stderrTask.GetAwaiter().GetResult() }
     if (Test-Path -LiteralPath (Join-Path $temp 'gui.log')) {

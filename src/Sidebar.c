@@ -238,13 +238,14 @@ static int _Sidebar_CompareEntries(bool bDirectory1, LPCWSTR name1, bool bDirect
     return StrCmpLogicalW(name1, name2);
 }
 
-// Convert a logical requested width to physical pixels and reserve 200 logical
-// pixels for the editor. Extremely narrow windows retain the 100-pixel minimum.
+// Apply the persisted logical range, convert to physical pixels and reserve 200
+// logical pixels for the editor. Extremely narrow windows retain the minimum.
 static int _Sidebar_ClampWidth(int logicalWidth, int clientWidth, UINT dpi)
 {
-    int const minimum = MulDiv(100, dpi, 96);
+    int const minimum = MulDiv(SIDEBAR_MIN_WIDTH, dpi, 96);
     int const available = clientWidth - MulDiv(200, dpi, 96);
-    int const maximum = available < minimum ? minimum : available;
+    int const limit = MulDiv(SIDEBAR_MAX_WIDTH, dpi, 96);
+    int const maximum = available < minimum ? minimum : (available > limit ? limit : available);
     int const requested = MulDiv(logicalWidth, dpi, 96);
     return requested < minimum ? minimum : (requested > maximum ? maximum : requested);
 }
@@ -323,22 +324,47 @@ static bool _Sidebar_LoadChildren(HTREEITEM parent)
     return success;
 }
 
-// Resolve a path below the current root, expanding ancestors only as needed.
-// When refreshMissing is true, retry a missing child once in its loaded parent.
-static HTREEITEM _Sidebar_FindPath(const HPATHL path, bool refreshMissing)
+// Return the borrowed suffix of target below root, or NULL outside that directory.
+// Inputs are non-null canonical absolute paths. Ignore DOS/UNC extended prefixes
+// without changing the owned paths needed by file APIs; retain directory boundaries.
+static LPCWSTR _Sidebar_RelativePath(LPCWSTR root, LPCWSTR target)
 {
-    HTREEITEM parent = TreeView_GetRoot(s_tree);
-    LPCWSTR const root = Path_Get(Settings.SidebarFolder);
-    LPCWSTR const target = Path_Get(path);
+    LPCWSTR paths[] = { root, target };
+    bool unc[] = { false, false };
+    for (int i = 0; i < 2; ++i) {
+        if (_wcsnicmp(paths[i], L"\\\\?\\UNC\\", 8) == 0) {
+            paths[i] += 8;
+            unc[i] = true;
+        } else if (wcsncmp(paths[i], L"\\\\?\\", 4) == 0) {
+            paths[i] += 4;
+        } else if (wcsncmp(paths[i], L"\\\\", 2) == 0) {
+            paths[i] += 2;
+            unc[i] = true;
+        }
+    }
+    root = paths[0];
+    target = paths[1];
     size_t const length = wcslen(root);
     size_t const targetLength = wcslen(target);
-    if (!parent || !length || targetLength < length ||
+    if (unc[0] != unc[1] || !length || targetLength < length ||
         CompareStringOrdinal(root, (int)length, target, (int)length, TRUE) != CSTR_EQUAL ||
         (targetLength > length && root[length - 1] != L'\\' && target[length] != L'\\')) {
         return NULL;
     }
     LPCWSTR part = target + length;
     while (*part == L'\\') { ++part; }
+    return part;
+}
+
+// Resolve a path below the current root, expanding ancestors only as needed.
+// When refreshMissing is true, retry a missing child once in its loaded parent.
+static HTREEITEM _Sidebar_FindPath(const HPATHL path, bool refreshMissing)
+{
+    HTREEITEM parent = TreeView_GetRoot(s_tree);
+    LPCWSTR part = _Sidebar_RelativePath(Path_Get(Settings.SidebarFolder), Path_Get(path));
+    if (!parent || !part) {
+        return NULL;
+    }
     while (*part) {
         LPCWSTR end = wcschr(part, L'\\');
         size_t const size = end ? (size_t)(end - part) : wcslen(part);
@@ -556,6 +582,9 @@ bool Sidebar_Create(HWND parent)
         s_tree = s_splitter = NULL;
         return false;
     }
+    // InitTreeView owns subclass data until destruction; installing it again leaks it.
+    InitWindowCommon(s_tree, true);
+    InitTreeView(s_tree);
     TreeView_SetExtendedStyle(s_tree, TVS_EX_DOUBLEBUFFER, TVS_EX_DOUBLEBUFFER);
     Sidebar_OnThemeChanged();
     // Root restoration is deferred until after startup's FileLoad.
@@ -644,8 +673,8 @@ void Sidebar_OnThemeChanged(void)
     if (!s_tree) {
         return;
     }
-    InitWindowCommon(s_tree, true);
-    InitTreeView(s_tree);
+    // Match the style dialog: let the existing subclass update colors and redraw.
+    SendMessage(s_tree, WM_THEMECHANGED, 0, 0);
     s_iconCount = 0;
     SHFILEINFOW info = { 0 };
     // A synthetic directory name yields the folder icon; a drive root yields a drive icon.

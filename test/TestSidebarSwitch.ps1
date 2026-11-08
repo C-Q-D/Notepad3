@@ -7,7 +7,10 @@ $temp = Join-Path $tempRoot ('switch-' + [guid]::NewGuid())
 [void](New-Item -ItemType Directory -Path $temp)
 try {
     $source = Get-Content -LiteralPath $SidebarSource -Raw
-    $parts = foreach ($name in @('_Sidebar_DecideSwitch', '_Sidebar_CompareEntries', '_Sidebar_ClampWidth')) {
+    $header = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\src\Sidebar.h') -Raw
+    $widthRange = [regex]::Match($header, 'enum \{ SIDEBAR_MIN_WIDTH = \d+, SIDEBAR_MAX_WIDTH = \d+ \};')
+    if (!$widthRange.Success) { throw 'Missing production logical width range' }
+    $parts = foreach ($name in @('_Sidebar_DecideSwitch', '_Sidebar_CompareEntries', '_Sidebar_ClampWidth', '_Sidebar_RelativePath')) {
         $match = [regex]::Match($source, '(?ms)^static [^\r\n]+ ' + $name + '\([^\r\n]*\)\r?\n\{.*?^}')
         if (!$match.Success) { throw "Missing production function $name" }
         $match.Value
@@ -18,7 +21,7 @@ try {
 #include <stdbool.h>
 #include <stdio.h>
 typedef enum { SW_SAME_FILE, SW_SAVE_SILENT, SW_ASK_UNTITLED, SW_NO_SAVE } SwitchAction;
-'@ + "`n" + ($parts -join "`n") + @'
+'@ + "`n" + $widthRange.Value + "`n" + ($parts -join "`n") + @'
 
 static int failures = 0;
 // Record an independent contract assertion; main returns failure if any check fails.
@@ -43,6 +46,28 @@ int main(void) {
     check("144 DPI scales requested width", _Sidebar_ClampWidth(300, 1500, 144) == 450);
     check("144 DPI scales minimum", _Sidebar_ClampWidth(50, 1500, 144) == 150);
     check("144 DPI scales editor reserve", _Sidebar_ClampWidth(1000, 1500, 144) == 1200);
+    check("large client caps logical width at 4000", _Sidebar_ClampWidth(5000, 6000, 96) == 4000);
+    check("144 DPI caps logical width at 4000", _Sidebar_ClampWidth(5000, 9000, 144) == 6000);
+    check("4000 logical pixels remain allowed", _Sidebar_ClampWidth(4000, 6000, 96) == 4000);
+    check("editor reserve overrides 4000 cap", _Sidebar_ClampWidth(5000, 6000, 144) == 5700);
+    WCHAR longTarget[512] = L"\\\\?\\C:\\root\\";
+    for (int i = 12; i < 300; ++i) { longTarget[i] = (i == 92 || i == 173 || i == 254) ? L'\\' : L'x'; }
+    longTarget[300] = L'\0';
+    LPCWSTR relative = _Sidebar_RelativePath(L"C:\\root", longTarget);
+    check("extended target beyond 260 stays inside short DOS root", relative && wcslen(relative) == 288);
+    relative = _Sidebar_RelativePath(L"\\\\?\\C:\\root", L"c:\\ROOT\\file.txt");
+    check("extended DOS root matches ordinary target", relative && wcscmp(relative, L"file.txt") == 0);
+    relative = _Sidebar_RelativePath(L"\\\\server\\share\\root", L"\\\\?\\UNC\\SERVER\\SHARE\\root\\file.txt");
+    check("extended UNC target matches ordinary UNC root", relative && wcscmp(relative, L"file.txt") == 0);
+    relative = _Sidebar_RelativePath(L"\\\\?\\UNC\\server\\share\\root", L"\\\\server\\share\\root\\file.txt");
+    check("extended UNC root matches ordinary UNC target", relative && wcscmp(relative, L"file.txt") == 0);
+    check("DOS sibling prefix is outside root", !_Sidebar_RelativePath(L"C:\\a", L"\\\\?\\C:\\ab\\x"));
+    check("UNC sibling prefix is outside root", !_Sidebar_RelativePath(L"\\\\server\\share\\a", L"\\\\?\\UNC\\server\\share\\ab\\x"));
+    relative = _Sidebar_RelativePath(L"C:\\", L"\\\\?\\C:\\file.txt");
+    check("drive root accepts child", relative && wcscmp(relative, L"file.txt") == 0);
+    relative = _Sidebar_RelativePath(L"C:\\root", L"\\\\?\\C:\\ROOT");
+    check("same directory yields empty suffix", relative && !*relative);
+    check("different UNC share is outside root", !_Sidebar_RelativePath(L"\\\\server\\share", L"\\\\?\\UNC\\server\\other\\x"));
     return failures ? 1 : 0;
 }
 '@

@@ -2,6 +2,9 @@
 #pragma once
 #include "TypeDefs.h"
 
+// Persisted widths use 96-DPI logical pixels; layout may further limit available space.
+enum { SIDEBAR_MIN_WIDTH = 100, SIDEBAR_MAX_WIDTH = 4000 };
+
 // Create child controls for parent using the configured visibility; root restoration
 // follows startup FileLoad. Return false if either control or subclass fails.
 bool Sidebar_Create(HWND parent);

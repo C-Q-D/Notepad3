@@ -2,14 +2,14 @@
 ; All window input targets handles owned by the isolated executable started here.
 #Requires AutoHotkey v2.0
 #SingleInstance Off
-global testDir := A_Args[1], through := A_Args[2], testPid := 0, main := 0
+global testDir := A_Args[1], through := A_Args[2], testPid := 0, testCreated := 0, main := 0
 global scenario := A_Args[3]
 global screenshotDirectory := A_Args[4], themeName := A_Args[5]
 global logFile := testDir '\gui.log'
 exitCode := 0
 try {
     Run('"' testDir '\Notepad3.exe" /n "' testDir '\fixture\a.txt"', testDir, , &testPid)
-    FileAppend(testPid '`n', testDir '\pids.txt')
+    testCreated := RecordProcess(testPid)
     main := WinWait('ahk_pid ' testPid, , 10)
     Check(main != 0, 'A main window starts')
     DllCall('SetWindowPos', 'ptr', main, 'ptr', 0, 'int', 80, 'int', 80, 'int', 1100, 'int', 750, 'uint', 0x14)
@@ -20,6 +20,13 @@ try {
     dpi := DllCall('GetDpiForWindow', 'ptr', main, 'uint')
     ControlGetPos(&tx, &ty, &tw, &th, tree)
     Check(Abs(tw - 300 * dpi / 96) <= 4, 'A width is 300 logical pixels (actual ' tw ', DPI ' dpi ')')
+    ; Check startup before Show/Refresh can populate or repair an empty tree.
+    if Ord(through) >= Ord('B') {
+        WaitUntil(() => SendMessage(0x110A, 0, 0, tree) != 0, 'B startup root restored before any toggle')
+        root := SendMessage(0x110A, 0, 0, tree)
+        Check(TreeText(tree, root) = 'fixture', 'B startup root is test directory name')
+        WaitUntil(() => TreeText(tree, SendMessage(0x110A, 9, 0, tree)) = 'a.txt', 'B startup command line file selected before any toggle')
+    }
     DragWidth(tree, 50)
     ControlGetPos(, , &tw, , tree)
     Check(Abs(tw - 100 * dpi / 96) <= 4, 'A dragging enforces minimum width')
@@ -56,6 +63,9 @@ try {
         WaitUntil(() => SendMessage(0x110A, 4, child, tree) = 0, 'B collapsing sub discards loaded children')
         ClickTree(tree, child, true)
         WaitUntil(() => TreeText(tree, SendMessage(0x110A, 4, child, tree)) = 'inner.txt', 'B re-expanding sub reloads contents')
+        Loop 3
+            SendMessage(0x31A, 0, 0, , main)
+        Check(TreeText(tree, SendMessage(0x110A, 9, 0, tree)) = 'a.txt', 'B theme updates preserve current-file selection')
     }
     if screenshotDirectory != '' {
         CaptureWindow(main, screenshotDirectory '\sidebar-' StrLower(themeName) '.png')
@@ -96,11 +106,11 @@ try {
         FileAppend('read-only original`r`n', testDir '\fixture\ro.txt', 'UTF-8')
         FileSetAttrib('+R', testDir '\fixture\ro.txt')
         SendMessage(2014, 0, 0, editor)
-        PostMessage(0x10, 0, 0, , main)
+        CloseTestWindow(main)
         Check(WinWaitClose(main, , 5), 'E prior fixture window closes')
         WaitUntil(() => !ProcessExist(testPid), 'E prior fixture process exits', 5000)
         Run('"' testDir '\Notepad3.exe" /n "' testDir '\fixture\ro.txt"', testDir, , &testPid)
-        FileAppend(testPid '`n', testDir '\pids.txt')
+        testCreated := RecordProcess(testPid)
         main := WinWait('ahk_pid ' testPid, , 10)
         Check(main != 0, 'E read-only fixture window starts')
         tree := ControlGetHwnd('SysTreeView321', main)
@@ -159,9 +169,45 @@ try {
         TreeKey(tree, 0x09)
         WaitUntil(() => ControlGetFocus(main) = editor, 'F Tab returns focus to editor')
     }
+    if Ord(through) >= Ord('F') && (scenario = 'All' || scenario = 'LongPath') {
+        ; Create this extra branch after B's exact four-entry assertion.
+        SendMessage(2014, 0, 0, editor)
+        longDir := testDir '\fixture\long-path'
+        segment := 'segment-'
+        Loop 72
+            segment .= 'x'
+        Loop 3
+            longDir .= '\' segment
+        Check(StrLen(longDir) > 260, 'LongPath expanded directory crosses 260 characters (actual ' StrLen(longDir) ')')
+        DirCreate('\\?\' longDir)
+        FileAppend('long-path document', '\\?\' longDir '\long.txt', 'UTF-8')
+        ControlFocus(tree)
+        TreeKey(tree, 0x74)
+        WaitUntil(() => TreeFind(tree, 'long-path') != 0, 'LongPath refresh finds new branch')
+        longParent := TreeFind(tree, 'long-path')
+        SendMessage(0x1102, 2, longParent, tree)
+        Loop 3 {
+            longParent := TreeFind(tree, segment, longParent)
+            Check(longParent != 0, 'LongPath directory component exists')
+            SendMessage(0x1102, 2, longParent, tree)
+        }
+        longItem := TreeFind(tree, 'long.txt', longParent)
+        ClickTree(tree, longItem)
+        WaitUntil(() => InStr(WinGetTitle(main), 'long.txt') != 0, 'LongPath file opens')
+        WaitUntil(() => TreeText(tree, SendMessage(0x110A, 9, 0, tree)) = 'long.txt', 'LongPath current file remains selected')
+        ControlFocus(tree)
+        TreeKey(tree, 0x74)
+        WaitUntil(() => TreeText(tree, SendMessage(0x110A, 9, 0, tree)) = 'long.txt', 'LongPath F5 restores selected file')
+        longParent := TreeFind(tree, 'long-path')
+        Loop 3 {
+            longParent := TreeFind(tree, segment, longParent)
+            Check(longParent != 0 && (SendMessage(0x1127, longParent, 0x20, tree) & 0x20), 'LongPath F5 restores expanded directory')
+        }
+        Check(EditorText(editor) = 'long-path document', 'LongPath refresh preserves editor text')
+    }
     ; Clear the dirty flag only after all assertions, so normal close tests settings.
     SendMessage(2014, 0, 0, editor)
-    PostMessage(0x10, 0, 0, , main)
+    CloseTestWindow(main)
     Check(WinWaitClose(main, , 5), 'A normal close completes')
     WaitUntil(() => !ProcessExist(testPid), 'A process exits after settings save', 5000)
     main := 0
@@ -183,10 +229,45 @@ try {
 } finally {
     if main && WinExist(main) {
         ; Close only this test instance. The PowerShell owner enforces final cleanup.
-        try PostMessage(0x10, 0, 0, , main)
+        try CloseTestWindow(main)
     }
 }
 ExitApp(exitCode)
+
+; Return the OS creation FILETIME for pid, or zero if that process has exited.
+; A creation timestamp prevents a recycled PID from authorizing window cleanup.
+ProcessCreationTime(pid) {
+    process := DllCall('OpenProcess', 'uint', 0x1000, 'int', false, 'uint', pid, 'ptr')
+    if !process
+        return 0
+    try {
+        times := Buffer(32, 0)
+        if !DllCall('GetProcessTimes', 'ptr', process, 'ptr', times, 'ptr', times.Ptr + 8, 'ptr', times.Ptr + 16, 'ptr', times.Ptr + 24)
+            throw Error('Cannot read test process creation time')
+        return NumGet(times, 0, 'int64')
+    } finally {
+        DllCall('CloseHandle', 'ptr', process)
+    }
+}
+
+; Record both identity fields immediately after starting a Notepad3 test instance.
+; PowerShell uses the same FILETIME value before closing or killing that process.
+RecordProcess(pid) {
+    global testDir
+    created := ProcessCreationTime(pid)
+    if !created
+        throw Error('Test process exited before ownership could be recorded')
+    FileAppend(pid '|' created '`n', testDir '\pids.txt')
+    return created
+}
+
+; Close only the window whose process still matches this test's recorded identity.
+CloseTestWindow(window) {
+    global testPid, testCreated
+    if WinGetPID(window) != testPid || ProcessCreationTime(testPid) != testCreated
+        throw Error('Test process identity changed before close')
+    PostMessage(0x10, 0, 0, , window)
+}
 
 ; Exercise the actual splitter's capture/drag path with client-coordinate messages.
 ; logicalWidth is the desired left-pane width in 96-DPI logical pixels.
@@ -204,6 +285,8 @@ DragWidth(tree, logicalWidth) {
 ; Capture only the test window with PrintWindow and encode its bitmap as PNG.
 ; All GDI/GDI+ handles are released even when capture or encoding fails.
 CaptureWindow(window, path) {
+    ; Theme/layout messages invalidate children; paint them before PrintWindow's snapshot.
+    DllCall('RedrawWindow', 'ptr', window, 'ptr', 0, 'ptr', 0, 'uint', 0x185)
     WinGetPos(, , &width, &height, window)
     screen := DllCall('GetDC', 'ptr', window, 'ptr')
     canvas := DllCall('CreateCompatibleDC', 'ptr', screen, 'ptr')
@@ -263,9 +346,9 @@ CheckNoDialog(name) {
         Check(false, name)
 }
 
-; Find a named direct root child; zero means absent, not an inferred selection.
-TreeFind(tree, name) {
-    root := SendMessage(0x110A, 0, 0, tree)
+; Find a named direct child of parent (zero defaults to root); zero means absent.
+TreeFind(tree, name, parent := 0) {
+    root := parent ? parent : SendMessage(0x110A, 0, 0, tree)
     item := SendMessage(0x110A, 4, root, tree)
     while item {
         if TreeText(tree, item) = name

@@ -56,6 +56,7 @@ extern "C" {
 #include "Dialogs.h"
 #include "Encoding.h"
 #include "Notepad3.h"
+#include "Sidebar.h"
 #include "MuiLanguage.h"
 #include "DynStrg.h"
 #include "uthash/utstack.h"
@@ -1903,7 +1904,7 @@ void LoadSettings()
     GET_BOOL_VALUE_FROM_INISECTION(ShowToolbar, true);
     GET_BOOL_VALUE_FROM_INISECTION(ShowStatusbar, true);
     GET_BOOL_VALUE_FROM_INISECTION(ShowSidebar, false);
-    GET_INT_VALUE_FROM_INISECTION(SidebarWidth, 240, 100, 4000);
+    GET_INT_VALUE_FROM_INISECTION(SidebarWidth, 240, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
 
     GET_INT_VALUE_FROM_INISECTION(EncodingDlgSizeX, 340, INT_MIN, INT_MAX);
     GET_INT_VALUE_FROM_INISECTION(EncodingDlgSizeY, 292, INT_MIN, INT_MAX);
@@ -2372,6 +2373,8 @@ static bool _SaveSettings(bool bForceSaveSettings)
     SAVE_VALUE_IF_NOT_EQ_DEFAULT(Bool, ShowToolbar);
     SAVE_VALUE_IF_NOT_EQ_DEFAULT(Bool, ShowStatusbar);
     SAVE_VALUE_IF_NOT_EQ_DEFAULT(Bool, ShowSidebar);
+    // Keep persisted values in the same logical range used by loading and dragging.
+    Settings.SidebarWidth = clampi(Settings.SidebarWidth, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
     SAVE_VALUE_IF_NOT_EQ_DEFAULT(Int, SidebarWidth);
 
     SAVE_VALUE_IF_NOT_EQ_DEFAULT(Int, EncodingDlgSizeX);
