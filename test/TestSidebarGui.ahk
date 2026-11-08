@@ -250,6 +250,8 @@ try {
         RunOpenFolderScenario()
     if Ord(through) >= Ord('F') && (scenario = 'All' || scenario = 'Recent')
         RunRecentScenario()
+    if Ord(through) >= Ord('F') && (scenario = 'All' || scenario = 'Create')
+        RunCreateScenario()
 } catch Error as err {
     FileAppend('FAIL: ' err.Message '`n', logFile)
     exitCode := 1
@@ -858,6 +860,172 @@ RecentWait(condition, name, timeoutMs := 3000) {
     while !condition.Call() && A_TickCount - start < timeoutMs
         Sleep(25)
     RecentAssert(condition.Call(), name)
+; Click one painted header action in panel-client pixels, without desktop input.
+; action is New or Refresh; the layout follows the approved 30px header circles.
+ClickSidebarAction(tree, action) {
+    panel := DllCall('GetParent', 'ptr', tree, 'ptr')
+    dpi := DllCall('GetDpiForWindow', 'ptr', panel, 'uint')
+    ControlGetPos(, , &width, , panel)
+    x := width - Round((action = 'New' ? 63 : 27) * dpi / 96)
+    point := (Round(37 * dpi / 96) << 16) | (x & 0xffff)
+    PostMessage(0x201, 1, point, panel)
+    PostMessage(0x202, 0, point, panel)
+}
+
+; Open the real modal input dialog through the painted plus button. All handles
+; must belong to this recorded process; a missing dialog is a feature failure.
+OpenCreateDialog(tree) {
+    global main, testPid
+    ClickSidebarAction(tree, 'New')
+    dialog := WinWait('New file ahk_class #32770 ahk_pid ' testPid, , 3)
+    if !dialog
+        throw Error('Create plus button opens localized input dialog')
+    return dialog
+}
+
+; Post dialog keys to the actual input control, so Enter/Esc exercise the native
+; modal message loop instead of bypassing it with a synthetic command.
+CreateDialogKey(dialog, key) {
+    edit := ControlGetHwnd('Edit1', dialog)
+    PostMessage(0x100, key, 0, edit)
+    PostMessage(0x101, key, 0, edit)
+}
+
+; Verify a rejected name through its owned message box and on-disk result.
+; expected is the exact localized message. Existing bytes are compared by the
+; caller for the collision case; the dialog must remain editable after rejection.
+RejectCreateName(tree, name, expected) {
+    global testPid
+    dialog := OpenCreateDialog(tree)
+    ControlSetText(name, ControlGetHwnd('Edit1', dialog))
+    CreateDialogKey(dialog, 0x0D)
+    message := 0
+    start := A_TickCount
+    while !(message := CreateOwnedMessage(dialog)) && A_TickCount - start < 3000
+        Sleep(25)
+    if !message
+        throw Error('Create rejection shows an owned message box: ' name)
+    Check(InStr(WinGetText(message), expected) != 0, 'Create rejection has expected message: ' name)
+    PostMessage(0xF5, 0, 0, ControlGetHwnd('Button1', message))
+    if !WinWaitClose(message, , 3)
+        throw Error('Create rejection message did not close: ' name)
+    Check(WinExist(dialog) && ControlGetText(ControlGetHwnd('Edit1', dialog)) = name, 'Create rejection retains editable name: ' name)
+    CreateDialogKey(dialog, 0x1B)
+    if !WinWaitClose(dialog, , 3)
+        throw Error('Create Esc did not close rejected input: ' name)
+}
+
+; Find the warning owned by the input dialog, excluding the input dialog itself.
+; Return zero until Windows has created that warning in our recorded process.
+CreateOwnedMessage(dialog) {
+    global testPid
+    for window in WinGetList('ahk_class #32770 ahk_pid ' testPid) {
+        if DllCall('GetWindow', 'ptr', window, 'uint', 4, 'ptr') = dialog
+            return window
+    }
+    return 0
+}
+
+; Exercise refresh, selection-derived destinations, CREATE_NEW and invalid-name
+; rejection at real filesystem/window boundaries. Fixtures are unique to this
+; runner; every successful creation must also reach the normal editor open path.
+RunCreateScenario() {
+    global testDir, main, testPid, screenshotDirectory, themeName
+    folder := testDir '\fixture'
+    tree := StartSidebarScenario(folder, 1, folder '\a.txt')
+    DllCall('SetWindowPos', 'ptr', main, 'ptr', 0, 'int', 80, 'int', 80, 'int', 1100, 'int', 750, 'uint', 0x14)
+    editor := ControlGetHwnd('Scintilla1', main)
+    if !TreeFind(tree, 'sub')
+        throw Error('Create fixture root did not load')
+    SendMessage(0x1102, 2, TreeFind(tree, 'sub'), tree)
+    FileAppend('external button', folder '\sub\button-refresh.txt', 'UTF-8')
+    ClickSidebarAction(tree, 'Refresh')
+    WaitUntil(() => TreeFind(tree, 'button-refresh.txt', TreeFind(tree, 'sub')) != 0, 'Create refresh button enumerates external child')
+    Check((SendMessage(0x1127, TreeFind(tree, 'sub'), 0x20, tree) & 0x20) != 0, 'Create refresh button restores expanded folder')
+    Check(TreeText(tree, SendMessage(0x110A, 9, 0, tree)) = 'a.txt', 'Create refresh button restores selection')
+    FileAppend('external F5', folder '\sub\key-refresh.txt', 'UTF-8')
+    ControlFocus(tree)
+    TreeKey(tree, 0x74)
+    WaitUntil(() => TreeFind(tree, 'key-refresh.txt', TreeFind(tree, 'sub')) != 0, 'Create F5 enumerates external child')
+    Check((SendMessage(0x1127, TreeFind(tree, 'sub'), 0x20, tree) & 0x20) != 0, 'Create F5 restores expanded folder')
+    Check(TreeText(tree, SendMessage(0x110A, 9, 0, tree)) = 'a.txt', 'Create F5 restores selection')
+
+    SendMessage(0x1102, 1, TreeFind(tree, 'sub'), tree)
+    SendMessage(0x110B, 9, TreeFind(tree, 'sub'), tree)
+    dialog := OpenCreateDialog(tree)
+    Check(!DllCall('IsWindowEnabled', 'ptr', main), 'Create dialog is modal')
+    Check(InStr(WinGetText(dialog), 'File name:') && InStr(WinGetText(dialog), 'Create') && InStr(WinGetText(dialog), 'Cancel'), 'Create dialog uses localized controls')
+    if screenshotDirectory != '' {
+        CaptureWindow(main, screenshotDirectory '\create-' StrLower(themeName) '.png', dialog)
+    }
+    ControlSetText('folder-created.txt', ControlGetHwnd('Edit1', dialog))
+    CreateDialogKey(dialog, 0x0D)
+    Check(WinWaitClose(dialog, , 3), 'Create Enter confirms file creation')
+    Check(FileExist(folder '\sub\folder-created.txt') && FileGetSize(folder '\sub\folder-created.txt') = 0, 'Create selected folder receives empty file')
+    WaitUntil(() => InStr(WinGetTitle(main), 'folder-created.txt') && EditorText(editor) = '', 'Create new file opens in editor')
+    WaitUntil(() => TreeText(tree, SendMessage(0x110A, 9, 0, tree)) = 'folder-created.txt', 'Create new file is selected in tree')
+    Check((SendMessage(0x1127, TreeFind(tree, 'sub'), 0x20, tree) & 0x20) != 0, 'Create destination folder stays expanded')
+
+    TypeText(editor, 'saved before creating sibling')
+    dialog := OpenCreateDialog(tree)
+    ControlSetText('sibling-created.txt', ControlGetHwnd('Edit1', dialog))
+    PostMessage(0xF5, 0, 0, ControlGetHwnd('Button1', dialog))
+    Check(WinWaitClose(dialog, , 3), 'Create button confirms file creation')
+    WaitUntil(() => InStr(WinGetTitle(main), 'sibling-created.txt'), 'Create file selection uses its parent folder')
+    Check(FileExist(folder '\sub\sibling-created.txt') && FileGetSize(folder '\sub\sibling-created.txt') = 0, 'Create selected file parent receives empty sibling')
+    Check(FileRead(folder '\sub\folder-created.txt', 'UTF-8') = 'saved before creating sibling', 'Create uses existing silent save before switching')
+    RejectCreateName(tree, 'folder-created.txt', 'A file or folder named “folder-created.txt” already exists. Choose another name.')
+    Check(FileRead(folder '\sub\folder-created.txt', 'UTF-8') = 'saved before creating sibling', 'Create collision preserves original bytes')
+    RejectCreateName(tree, 'folder-created.txt:stream', 'Enter a valid file name.')
+    Check(!FileExist(folder '\sub\folder-created.txt:stream'), 'Create invalid name writes no file or stream')
+    RejectCreateName(tree, 'CON.txt', 'Enter a valid file name.')
+    RejectCreateName(tree, 'trailing.', 'Enter a valid file name.')
+
+    dialog := OpenCreateDialog(tree)
+    ControlSetText('cancelled.txt', ControlGetHwnd('Edit1', dialog))
+    CreateDialogKey(dialog, 0x1B)
+    Check(WinWaitClose(dialog, , 3) && !FileExist(folder '\sub\cancelled.txt'), 'Create Esc cancels valid name without creating')
+
+    ; Remove only this empty fixture after opening the dialog. CREATE_NEW must
+    ; report a missing-parent error and must not recreate the removed folder.
+    DirCreate(folder '\removed')
+    ClickSidebarAction(tree, 'Refresh')
+    WaitUntil(() => TreeFind(tree, 'removed') != 0, 'Create removed-parent fixture appears')
+    SendMessage(0x110B, 9, TreeFind(tree, 'removed'), tree)
+    dialog := OpenCreateDialog(tree)
+    DirDelete(folder '\removed')
+    ControlSetText('failed.txt', ControlGetHwnd('Edit1', dialog))
+    CreateDialogKey(dialog, 0x0D)
+    message := 0
+    WaitUntil(() => (message := CreateOwnedMessage(dialog)) != 0, 'Create other failure shows owned warning')
+    Check(InStr(WinGetText(message), 'Cannot create file “failed.txt”.') != 0 && !DirExist(folder '\removed'), 'Create other failure reports create-failed without recreating parent')
+    PostMessage(0xF5, 0, 0, ControlGetHwnd('Button1', message))
+    if !WinWaitClose(message, , 3)
+        throw Error('Create failure message did not close')
+    CreateDialogKey(dialog, 0x1B)
+    if !WinWaitClose(dialog, , 3)
+        throw Error('Create failure input did not close')
+
+    SendMessage(0x110B, 9, FolderGroup(tree), tree)
+    dialog := OpenCreateDialog(tree)
+    ControlSetText('group-created.txt', ControlGetHwnd('Edit1', dialog))
+    CreateDialogKey(dialog, 0x0D)
+    Check(WinWaitClose(dialog, , 3), 'Create group selection confirms')
+    WaitUntil(() => InStr(WinGetTitle(main), 'group-created.txt') && FileExist(folder '\group-created.txt'), 'Create folder group uses root directory')
+    SendMessage(0x110B, 9, 0, tree)
+    dialog := OpenCreateDialog(tree)
+    ControlSetText('unselected-created.txt', ControlGetHwnd('Edit1', dialog))
+    CreateDialogKey(dialog, 0x0D)
+    Check(WinWaitClose(dialog, , 3), 'Create no selection confirms')
+    WaitUntil(() => InStr(WinGetTitle(main), 'unselected-created.txt') && FileExist(folder '\unselected-created.txt'), 'Create no selection uses root directory')
+    FinishSidebarScenario('Create')
+
+    tree := StartSidebarScenario('', 1, folder '\a.txt')
+    ClickSidebarAction(tree, 'New')
+    Sleep(150)
+    Check(!WinExist('New file ahk_class #32770 ahk_pid ' testPid), 'Create no root opens no input dialog')
+    Check(!FileExist(testDir '\unselected-created.txt'), 'Create no root writes no file in working directory')
+    FinishSidebarScenario('Create no root')
 }
 
 ; Exercise group persistence through real clicks, normal close and fresh startup.
@@ -1176,8 +1344,9 @@ DragWidth(panel, logicalWidth) {
 }
 
 ; Capture only the test window with PrintWindow and encode its bitmap as PNG.
+; Optional overlay is an owned dialog composed at its actual screen position.
 ; All GDI/GDI+ handles are released even when capture or encoding fails.
-CaptureWindow(window, path) {
+CaptureWindow(window, path, overlay := 0) {
     ; Theme/layout messages invalidate children; paint them before PrintWindow's snapshot.
     DllCall('RedrawWindow', 'ptr', window, 'ptr', 0, 'ptr', 0, 'uint', 0x185)
     WinGetPos(, , &width, &height, window)
@@ -1190,6 +1359,8 @@ CaptureWindow(window, path) {
     try {
         if !screen || !canvas || !bitmap || !DllCall('PrintWindow', 'ptr', window, 'ptr', canvas, 'uint', 2)
             throw Error('PrintWindow capture failed')
+        if overlay
+            CaptureDialogOverlay(canvas, window, overlay)
         startup := Buffer(24, 0)
         NumPut('uint', 1, startup)
         if DllCall('gdiplus\GdiplusStartup', 'uptr*', &token, 'ptr', startup, 'ptr', 0)
@@ -1215,6 +1386,40 @@ CaptureWindow(window, path) {
             DllCall('ReleaseDC', 'ptr', window, 'ptr', screen)
         if library
             DllCall('FreeLibrary', 'ptr', library)
+    }
+}
+
+; Composite an owned dialog onto its owner's snapshot because PrintWindow does
+; not include top-level owned windows. This keeps the screenshot one whole window.
+CaptureDialogOverlay(canvas, owner, dialog) {
+    WinGetPos(&ownerX, &ownerY, , , owner)
+    WinGetPos(&x, &y, &width, &height, dialog)
+    memory := DllCall('CreateCompatibleDC', 'ptr', canvas, 'ptr')
+    bitmap := DllCall('CreateCompatibleBitmap', 'ptr', canvas, 'int', width, 'int', height, 'ptr')
+    previous := DllCall('SelectObject', 'ptr', memory, 'ptr', bitmap, 'ptr')
+    try {
+        if !memory || !bitmap || !DllCall('PrintWindow', 'ptr', dialog, 'ptr', memory, 'uint', 2)
+            throw Error('Create dialog PrintWindow failed')
+        frame := Buffer(16, 0)
+        sourceX := 0, sourceY := 0
+        ; PrintWindow leaves the invisible resize/shadow margins black. DWM's
+        ; visible frame bounds exclude those margins without altering the image.
+        if DllCall('dwmapi\DwmGetWindowAttribute', 'ptr', dialog, 'uint', 9, 'ptr', frame, 'uint', 16) = 0 {
+            sourceX := NumGet(frame, 0, 'int') - x
+            sourceY := NumGet(frame, 4, 'int') - y
+            x := NumGet(frame, 0, 'int'), y := NumGet(frame, 4, 'int')
+            width := NumGet(frame, 8, 'int') - x
+            height := NumGet(frame, 12, 'int') - y
+        }
+        if !DllCall('BitBlt', 'ptr', canvas, 'int', x - ownerX, 'int', y - ownerY, 'int', width, 'int', height, 'ptr', memory, 'int', sourceX, 'int', sourceY, 'uint', 0xCC0020)
+            throw Error('Create dialog screenshot composition failed')
+    } finally {
+        if previous
+            DllCall('SelectObject', 'ptr', memory, 'ptr', previous)
+        if bitmap
+            DllCall('DeleteObject', 'ptr', bitmap)
+        if memory
+            DllCall('DeleteDC', 'ptr', memory)
     }
 }
 

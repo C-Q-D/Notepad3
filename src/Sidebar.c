@@ -1,5 +1,5 @@
-// Folder sidebar panel, native tree and navigation policies. File I/O remains
-// owned by Notepad3. Tree rows keep filesystem names separate from their drawing.
+// Folder sidebar panel, native tree, navigation and new-file creation. Document
+// loading/saving remain owned by Notepad3. Tree names stay separate from drawing.
 #include "Helpers.h"
 #include <shlwapi.h>
 #include <stdlib.h>
@@ -413,6 +413,34 @@ static inline int _Sidebar_MatchName(LPCWSTR name, LPCWSTR query)
 static inline int _Sidebar_WidthTier(int logicalWidth)
 {
     return logicalWidth < 160 ? 2 : (logicalWidth < 220 ? 1 : 0);
+}
+
+// Validate one Windows filename component, without touching the filesystem.
+// NULL, empty/overlong components, control/wildcard/path characters, trailing
+// dots/spaces and DOS devices (also with extensions) are rejected. Filesystem
+// permissions and volume-specific limits remain the CREATE_NEW caller's job.
+static bool _Sidebar_IsValidFileName(LPCWSTR name)
+{
+    if (!name || !*name) { return false; }
+    size_t const length = wcslen(name);
+    if (length > 255 || name[length - 1] == L'.' || name[length - 1] == L' ') { return false; }
+    for (size_t i = 0; i < length; ++i) {
+        if (name[i] < L' ' || wcschr(L"\\/:*?\"<>|", name[i])) { return false; }
+    }
+    LPCWSTR const dot = wcschr(name, L'.');
+    size_t stemLength = dot ? (size_t)(dot - name) : length;
+    // Windows also treats e.g. "CON .txt" as the device, not an ordinary file.
+    while (stemLength && name[stemLength - 1] == L' ') { --stemLength; }
+    static LPCWSTR const devices[] = { L"CON", L"PRN", L"AUX", L"NUL", L"CONIN$", L"CONOUT$" };
+    for (size_t i = 0; i < sizeof(devices) / sizeof(devices[0]); ++i) {
+        if (stemLength == wcslen(devices[i]) && CompareStringOrdinal(name, (int)stemLength, devices[i], -1, TRUE) == CSTR_EQUAL) { return false; }
+    }
+    if (stemLength == 4 && (CompareStringOrdinal(name, 3, L"COM", 3, TRUE) == CSTR_EQUAL ||
+                            CompareStringOrdinal(name, 3, L"LPT", 3, TRUE) == CSTR_EQUAL)) {
+        WCHAR const digit = name[3];
+        if ((digit >= L'1' && digit <= L'9') || digit == L'\x00b9' || digit == L'\x00b2' || digit == L'\x00b3') { return false; }
+    }
+    return true;
 }
 
 // Apply the persisted logical range, convert to physical pixels and reserve 200
@@ -976,6 +1004,175 @@ sync:
     return loaded;
 }
 
+// Both handles belong to the caller for the modal lifetime. The dialog writes
+// created only after CREATE_NEW succeeds; cancellation leaves it empty.
+typedef struct SidebarNewFile {
+    HPATHL folder;
+    HPATHL created;
+} SidebarNewFile;
+enum { SIDEBAR_NAME_EDIT = 1001 };
+
+// Show a localized warning owned by the input dialog, retaining its editable
+// name. File-exists/create-failed resources take the attempted component as %s.
+static void _Sidebar_NewFileError(HWND dialog, UINT resource, LPCWSTR name)
+{
+    WCHAR format[512], title[128], message[1024];
+    GetLngString(resource, format, COUNTOF(format));
+    GetLngString(IDS_MUI_SIDEBAR_NEW_FILE, title, COUNTOF(title));
+    if (resource == IDS_MUI_SIDEBAR_NAME_INVALID) { StringCchCopy(message, COUNTOF(message), format); }
+    else { StringCchPrintf(message, COUNTOF(message), format, name); }
+    MessageBoxW(dialog, message, title, MB_OK | MB_ICONWARNING | (Settings.DialogsLayoutRTL ? MB_RTLREADING : 0));
+    HWND const edit = GetDlgItem(dialog, SIDEBAR_NAME_EDIT);
+    if (edit) { SetFocus(edit); }
+}
+
+// Build native children in dialog units and use the same font/theme entry points
+// as resource dialogs. Enter/Esc and tab order are owned by the modal dialog loop.
+// lParam borrows SidebarNewFile until EndDialog; failures keep the input open.
+static INT_PTR CALLBACK _Sidebar_NewFileProc(HWND dialog, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    switch (message) {
+    case WM_INITDIALOG: {
+        SetWindowLongPtr(dialog, DWLP_USER, (LONG_PTR)lParam);
+        WCHAR text[256];
+        GetLngString(IDS_MUI_SIDEBAR_NEW_FILE, text, COUNTOF(text));
+        SetWindowText(dialog, text);
+        SetDialogIconNP3(dialog);
+        InitWindowCommon(dialog, true);
+#ifdef D_NP3_WIN10_DARK_MODE
+        AllowDarkModeForWindowEx(dialog, UseDarkMode());
+        RefreshTitleBarThemeColor(dialog);
+#endif
+        static const struct { LPCWSTR type; UINT resource; DWORD style, extended; int id; RECT units; } controls[] = {
+            { WC_STATIC, IDS_MUI_SIDEBAR_FILE_NAME, SS_LEFT, 0, -1, { 12, 12, 268, 25 } },
+            { WC_EDIT, 0, WS_TABSTOP | ES_AUTOHSCROLL, WS_EX_CLIENTEDGE, SIDEBAR_NAME_EDIT, { 12, 28, 268, 43 } },
+            { WC_BUTTON, IDS_MUI_SIDEBAR_CREATE, WS_TABSTOP | BS_DEFPUSHBUTTON, 0, IDOK, { 130, 56, 196, 73 } },
+            { WC_BUTTON, IDS_MUI_SIDEBAR_CANCEL, WS_TABSTOP | BS_PUSHBUTTON, 0, IDCANCEL, { 202, 56, 268, 73 } }
+        };
+        for (size_t i = 0; i < COUNTOF(controls); ++i) {
+            RECT rect = controls[i].units;
+            MapDialogRect(dialog, &rect);
+            text[0] = L'\0';
+            if (controls[i].resource) { GetLngString(controls[i].resource, text, COUNTOF(text)); }
+            HWND const control = CreateWindowEx(controls[i].extended, controls[i].type, text, WS_CHILD | WS_VISIBLE | controls[i].style,
+                                               rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top,
+                                               dialog, (HMENU)(INT_PTR)controls[i].id, Globals.hInstance, NULL);
+            if (!control) { EndDialog(dialog, -1); return TRUE; }
+            SendMessage(control, WM_SETFONT, SendMessage(dialog, WM_GETFONT, 0, 0), FALSE);
+#ifdef D_NP3_WIN10_DARK_MODE
+            // Resource dialogs theme their already-created buttons. Our children
+            // are created during WM_INITDIALOG, so opt them in before theming.
+            AllowDarkModeForWindowEx(control, UseDarkMode());
+#endif
+            InitWindowCommon(control, true);
+        }
+        // Accept one extra UTF-16 unit so a pasted 256-unit component is rejected,
+        // rather than silently truncating it into a different valid filename.
+        SendDlgItemMessage(dialog, SIDEBAR_NAME_EDIT, EM_SETLIMITTEXT, 256, 0);
+        CenterDlgInParent(dialog, false);
+        SetFocus(GetDlgItem(dialog, SIDEBAR_NAME_EDIT));
+        return FALSE;
+    }
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDCANCEL) { EndDialog(dialog, IDCANCEL); return TRUE; }
+        if (LOWORD(wParam) == IDOK) {
+            SidebarNewFile* const state = (SidebarNewFile*)GetWindowLongPtr(dialog, DWLP_USER);
+            WCHAR name[257];
+            GetDlgItemText(dialog, SIDEBAR_NAME_EDIT, name, COUNTOF(name));
+            if (!_Sidebar_IsValidFileName(name)) {
+                _Sidebar_NewFileError(dialog, IDS_MUI_SIDEBAR_NAME_INVALID, name);
+                return TRUE;
+            }
+            HPATHL const target = Path_Copy(state->folder);
+            if (!Path_Append(target, name)) {
+                _Sidebar_NewFileError(dialog, IDS_MUI_SIDEBAR_CREATE_FAILED, name);
+                Path_Release(target);
+                return TRUE;
+            }
+            // CREATE_NEW is the authority: no precheck can prevent a race with
+            // another creator. The wrapper also preserves long-path support.
+            HANDLE const file = Path_CreateFile(target, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+            if (file == INVALID_HANDLE_VALUE) {
+                DWORD const error = GetLastError();
+                UINT const resource = error == ERROR_FILE_EXISTS || error == ERROR_ALREADY_EXISTS || Path_IsExistingDirectory(target) ?
+                                      IDS_MUI_SIDEBAR_FILE_EXISTS : IDS_MUI_SIDEBAR_CREATE_FAILED;
+                _Sidebar_NewFileError(dialog, resource, name);
+            } else {
+                CloseHandle(file);
+                Path_Reset(state->created, Path_Get(target));
+                EndDialog(dialog, IDOK);
+            }
+            Path_Release(target);
+            return TRUE;
+        }
+        break;
+    case WM_DPICHANGED:
+        ResizeDlg_DPIChanged(dialog, (RECT*)lParam, LOWORD(wParam));
+        return TRUE;
+#ifdef D_NP3_WIN10_DARK_MODE
+    CASE_WM_CTLCOLOR_SET:
+        return SetDarkModeCtlColors((HDC)wParam, UseDarkMode());
+    case WM_SETTINGCHANGE:
+        if (IsColorSchemeChangeMessage(lParam)) { SendMessage(dialog, WM_THEMECHANGED, 0, 0); }
+        break;
+    case WM_THEMECHANGED:
+        AllowDarkModeForWindowEx(dialog, UseDarkMode());
+        RefreshTitleBarThemeColor(dialog);
+        static const int controls[] = { SIDEBAR_NAME_EDIT, IDOK, IDCANCEL };
+        for (size_t i = 0; i < COUNTOF(controls); ++i) {
+            HWND const control = GetDlgItem(dialog, controls[i]);
+            if (control) {
+                AllowDarkModeForWindowEx(control, UseDarkMode());
+                SendMessage(control, WM_THEMECHANGED, 0, 0);
+            }
+        }
+        UpdateWindowEx(dialog);
+        break;
+#endif
+    }
+    return FALSE;
+}
+
+// Resolve the selected directory/file parent, falling back to the configured
+// root for group/empty selection. No root means no dialog or filesystem write.
+// A stack-owned template avoids duplicating dialog resources across 26 locales.
+static void _Sidebar_NewFile(void)
+{
+    if (!Path_IsExistingDirectory(Settings.SidebarFolder)) { return; }
+    HPATHL folder = _Sidebar_ItemPath(TreeView_GetSelection(s_tree));
+    if (Path_IsEmpty(folder)) { Path_Reset(folder, Path_Get(Settings.SidebarFolder)); }
+    else {
+        WCHAR name[MAX_PATH_EXPLICIT];
+        LPARAM kind;
+        if (_Sidebar_GetItem(TreeView_GetSelection(s_tree), name, &kind) && (kind == SIDEBAR_FILE || kind == SIDEBAR_EMPTY)) { Path_RemoveFileSpec(folder); }
+    }
+    if (!Path_IsExistingDirectory(folder)) { Path_Release(folder); return; }
+    DWORD storage[128] = { 0 };
+    DLGTEMPLATE* const layout = (DLGTEMPLATE*)storage;
+    layout->style = WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME | DS_SETFONT;
+    layout->cx = 280;
+    layout->cy = 85;
+    WORD* fields = (WORD*)(layout + 1);
+    *fields++ = 0; // No menu, default dialog class, title supplied on initialization.
+    *fields++ = 0;
+    *fields++ = 0;
+    WCHAR face[LF_FACESIZE] = L"Segoe UI";
+    WORD points = 9;
+    GetThemedDialogFont(face, &points);
+    *fields++ = points;
+    StringCchCopy((LPWSTR)fields, LF_FACESIZE, face);
+    SidebarNewFile state = { folder, Path_Allocate(NULL) };
+    INT_PTR const result = DialogBoxIndirectParam(Globals.hInstance, layout, Globals.hwndMain, _Sidebar_NewFileProc, (LPARAM)&state);
+    if (result == IDOK) {
+        Sidebar_Refresh();
+        _Sidebar_OpenFile(state.created);
+    } else if (result == -1) {
+        _Sidebar_NewFileError(Globals.hwndMain, IDS_MUI_SIDEBAR_CREATE_FAILED, L"");
+    }
+    Path_Release(state.created);
+    Path_Release(folder);
+}
+
 // Return the visible row at a client point, including blank space to its right.
 // Only visible rows are inspected; outside the tree's client rectangle yields NULL.
 static HTREEITEM _Sidebar_RowAt(POINT point)
@@ -1342,6 +1539,12 @@ static void _Sidebar_LayoutChildren(void)
         tool.uId = 3;
         tool.rect = s_sortRect;
         SendMessage(s_tooltip, TTM_NEWTOOLRECTW, 0, (LPARAM)&tool);
+        tool.uId = 4;
+        tool.rect = s_newRect;
+        SendMessage(s_tooltip, TTM_NEWTOOLRECTW, 0, (LPARAM)&tool);
+        tool.uId = 5;
+        tool.rect = s_refreshRect;
+        SendMessage(s_tooltip, TTM_NEWTOOLRECTW, 0, (LPARAM)&tool);
     }
     InvalidateRect(s_panel, NULL, FALSE);
 }
@@ -1497,8 +1700,9 @@ static LRESULT CALLBACK _Sidebar_PanelProc(HWND hwnd, UINT message, WPARAM wPara
         if (((NMHDR*)lParam)->hwndFrom == s_tooltip && ((NMHDR*)lParam)->code == TTN_GETDISPINFOW) {
             NMTTDISPINFOW* info = (NMTTDISPINFOW*)lParam;
             static WCHAR tip[256];
-            if (info->hdr.idFrom == 2 || info->hdr.idFrom == 3) {
-                GetLngString(info->hdr.idFrom == 2 ? IDS_MUI_SIDEBAR_HIDDEN_HINT : IDS_MUI_SIDEBAR_SORT_HINT, tip, COUNTOF(tip));
+            static UINT const tips[] = { IDS_MUI_SIDEBAR_HIDDEN_HINT, IDS_MUI_SIDEBAR_SORT_HINT, IDS_MUI_SIDEBAR_NEW_FILE, IDS_MUI_SIDEBAR_REFRESH };
+            if (info->hdr.idFrom >= 2 && info->hdr.idFrom <= 5) {
+                GetLngString(tips[info->hdr.idFrom - 2], tip, COUNTOF(tip));
                 info->lpszText = tip;
             } else {
                 info->lpszText = (LPWSTR)(Path_IsNotEmpty(Settings.SidebarFolder) ? Path_Get(Settings.SidebarFolder) : L"");
@@ -1539,7 +1743,9 @@ static LRESULT CALLBACK _Sidebar_PanelProc(HWND hwnd, UINT message, WPARAM wPara
     case WM_LBUTTONDOWN: {
         POINT const point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         if (_Sidebar_ToggleFooter(point)) { return 0; }
-        if (PtInRect(&s_filterRect, point) && IsWindowEnabled(s_filter)) { SetFocus(s_filter); }
+        if (PtInRect(&s_newRect, point)) { _Sidebar_NewFile(); }
+        else if (PtInRect(&s_refreshRect, point)) { Sidebar_Refresh(); }
+        else if (PtInRect(&s_filterRect, point) && IsWindowEnabled(s_filter)) { SetFocus(s_filter); }
         return 0;
     }
     case WM_NCDESTROY:
@@ -1612,7 +1818,8 @@ bool Sidebar_Create(HWND parent)
     tool.hwnd = s_panel;
     tool.uId = 1;
     tool.lpszText = LPSTR_TEXTCALLBACKW;
-    for (UINT_PTR id = 1; id <= 3; ++id) {
+    // Tool IDs: 1 header path, 2 hidden toggle, 3 sort, 4 new file, 5 refresh.
+    for (UINT_PTR id = 1; id <= 5; ++id) {
         tool.uId = id;
         if (!SendMessage(s_tooltip, TTM_ADDTOOLW, 0, (LPARAM)&tool)) {
             DestroyWindow(s_panel);

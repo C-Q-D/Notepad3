@@ -2,7 +2,7 @@
 # The AHK assertions use messages addressed to the test window, never global input.
 param(
     [ValidateSet('A','B','C','D','E','F')][string]$Through = 'F',
-    [ValidateSet('All','C','D','E','F','Groups','Toggles','LongPath','ShortPath','OpenFolder','Recent')][string]$Scenario = 'All',
+    [ValidateSet('All','C','D','E','F','Groups','Toggles','LongPath','ShortPath','OpenFolder','Recent','Create')][string]$Scenario = 'All',
     [ValidateSet('Light','Dark')][string]$Theme = 'Light',
     [string]$ScreenshotDirectory = '',
     [string]$Executable = (Join-Path $PSScriptRoot '..\Bin\Release_x64_v143\Notepad3.exe')

@@ -191,3 +191,88 @@ int main(void) {
         [IO.Path]::GetFileName($temp) -notlike 'switch-*') { throw 'Unsafe sidebar harness cleanup path' }
     Remove-Item -LiteralPath $temp -Recurse -Force
 }
+
+# T8 appends a separate harness; the original extraction list and checks stay intact.
+$nameTempRoot = [IO.Path]::GetFullPath((Join-Path $env:TEMP 'np3-sidebar\L1-tmp'))
+$nameTemp = Join-Path $nameTempRoot ('names-' + [guid]::NewGuid())
+[void](New-Item -ItemType Directory -Path $nameTemp)
+try {
+    $nameFunction = [regex]::Match($source, '(?ms)^static [^\r\n]+ _Sidebar_IsValidFileName\([^\r\n]*\)\r?\n\{.*?^}')
+    if (!$nameFunction.Success) { throw 'Missing production function _Sidebar_IsValidFileName' }
+    $nameHarness = @'
+#include <windows.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <wchar.h>
+'@ + "`n" + $nameFunction.Value + @'
+
+// Check literal Windows component rules; print both verdicts on a mismatch.
+int main(void) {
+    static const struct { const char* label; LPCWSTR name; bool valid; } cases[] = {
+        { "ordinary file", L"notes.txt", true },
+        { "extensionless file", L"README", true },
+        { "Unicode file", L"说明😀.txt", true },
+        { "hidden-style name", L".gitignore", true },
+        { "internal spaces and dots", L"my notes.v2.txt", true },
+        { "leading space", L" notes.txt", true },
+        { "device prefix is not device", L"CONSOLE.txt", true },
+        { "device suffix is not device", L"xNUL", true },
+        { "COM0 is ordinary", L"COM0.txt", true },
+        { "LPT10 is ordinary", L"LPT10.txt", true },
+        { "null name", NULL, false }, { "empty name", L"", false },
+        { "space only", L" ", false }, { "dot only", L".", false },
+        { "parent dot", L"..", false }, { "dots only", L"...", false },
+        { "trailing dot", L"note.", false }, { "trailing space", L"note ", false },
+        { "backslash", L"sub\\note", false }, { "slash", L"sub/note", false },
+        { "colon or alternate stream", L"note:stream", false },
+        { "asterisk", L"note*", false }, { "question mark", L"note?", false },
+        { "quote", L"note\"", false }, { "less than", L"note<", false },
+        { "greater than", L"note>", false }, { "pipe", L"note|", false },
+        { "control character", L"note\x1f", false },
+        { "CON device", L"CON", false }, { "PRN device extension", L"prn.txt", false },
+        { "AUX mixed case", L"AuX", false }, { "NUL multiple extensions", L"NUL.a.txt", false },
+        { "CON space before extension", L"CON .txt", false },
+        { "COM1 device", L"com1.txt", false }, { "COM9 device", L"COM9", false },
+        { "LPT1 device", L"LPT1", false }, { "LPT9 device", L"lpt9.log", false },
+        { "COM superscript one", L"COM¹.txt", false },
+        { "LPT superscript two", L"LPT²", false },
+        { "COM superscript three", L"COM³", false },
+        { "console input device", L"CONIN$", false },
+        { "console output device", L"CONOUT$.txt", false }
+    };
+    int failures = 0;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); ++i) {
+        bool const actual = _Sidebar_IsValidFileName(cases[i].name);
+        printf("%s: filename %s\n", actual == cases[i].valid ? "PASS" : "FAIL", cases[i].label);
+        if (actual != cases[i].valid) {
+            fwprintf(stderr, L"  input: [%ls]; expected: %d; actual: %d\n", cases[i].name ? cases[i].name : L"(null)", cases[i].valid, actual);
+            ++failures;
+        }
+    }
+    WCHAR boundary[257];
+    for (int i = 0; i < 256; ++i) { boundary[i] = L'a'; }
+    boundary[255] = L'\0';
+    bool const valid255 = _Sidebar_IsValidFileName(boundary);
+    printf("%s: filename 255 UTF16 units accepted\n", valid255 ? "PASS" : "FAIL");
+    failures += !valid255;
+    boundary[255] = L'a'; boundary[256] = L'\0';
+    bool const valid256 = _Sidebar_IsValidFileName(boundary);
+    printf("%s: filename 256 UTF16 units rejected\n", !valid256 ? "PASS" : "FAIL");
+    failures += valid256;
+    return failures ? 1 : 0;
+}
+'@
+    $nameTest = Join-Path $nameTemp 'SidebarNames.c'
+    Set-Content -LiteralPath $nameTest -Value $nameHarness -Encoding utf8
+    $nameExe = Join-Path $nameTemp 'SidebarNames.exe'
+    $nameArgs = @('/nologo', '/W4', '/WX', '/std:c11', '/utf-8', '/DUNICODE', '/D_UNICODE', $nameTest, "/Fo$nameTemp\", "/Fe$nameExe", '/link', 'kernel32.lib')
+    & cl.exe @nameArgs
+    if ($LASTEXITCODE -ne 0) { throw 'Sidebar filename harness compilation failed' }
+    & $nameExe
+    if ($LASTEXITCODE -ne 0) { throw 'Sidebar filename assertions failed' }
+} finally {
+    # Only this unique filename harness can be removed, never the shared root.
+    if ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($nameTemp)) -ne $nameTempRoot -or
+        [IO.Path]::GetFileName($nameTemp) -notlike 'names-*') { throw 'Unsafe sidebar filename harness cleanup path' }
+    Remove-Item -LiteralPath $nameTemp -Recurse -Force
+}
