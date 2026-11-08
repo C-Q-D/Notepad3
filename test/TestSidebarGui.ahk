@@ -1037,23 +1037,6 @@ RunCreateScenario() {
     Check(WinWaitClose(dialog, , 3), 'Create no selection confirms')
     WaitUntil(() => InStr(WinGetTitle(main), 'unselected-created.txt') && FileExist(folder '\unselected-created.txt'), 'Create no selection uses root directory')
 
-    ; Existing filesystem rows pass through the same interpreter as newly created
-    ; files. A literal apostrophe must never redirect activation to its sibling.
-    FileAppend('literal row bytes', folder "\literal-row.txt'", 'UTF-8')
-    FileAppend('unrelated row alias', folder '\literal-row.txt', 'UTF-8')
-    ClickSidebarAction(tree, 'Refresh')
-    WaitUntil(() => TreeFind(tree, "literal-row.txt'") != 0, 'Create interpreted row fixture appears')
-    beforeTitle := WinGetTitle(main)
-    beforeText := EditorText(editor)
-    ClickTree(tree, TreeFind(tree, "literal-row.txt'"))
-    warning := WinWait('New file ahk_class #32770 ahk_pid ' testPid, , 3)
-    Check(warning != 0 && InStr(WinGetText(warning), 'Enter a valid file name.'), 'Create interpreted row warns instead of opening alias')
-    PostMessage(0xF5, 0, 0, ControlGetHwnd('Button1', warning))
-    if !WinWaitClose(warning, , 3)
-        throw Error('Create interpreted-row warning did not close')
-    WaitUntil(() => TreeText(tree, SendMessage(0x110A, 9, 0, tree)) = 'unselected-created.txt', 'Create interpreted row restores current selection')
-    Check(WinGetTitle(main) = beforeTitle && EditorText(editor) = beforeText && FileRead(folder "\literal-row.txt'", 'UTF-8') = 'literal row bytes' && FileRead(folder '\literal-row.txt', 'UTF-8') = 'unrelated row alias', 'Create interpreted row preserves document and both files')
-
     ; Creation precedes the existing save-before-switch prompt. Cancelling that
     ; prompt keeps the dirty untitled document, while retaining the empty file.
     PostMessage(0x111, 40000, 0, , main)

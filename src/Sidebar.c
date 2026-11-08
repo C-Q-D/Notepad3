@@ -1028,7 +1028,8 @@ static void _Sidebar_NewFileError(HWND dialog, UINT resource, LPCWSTR name)
 
 // FileLoad and its same-file comparison interpret quotes/environment variables.
 // Check the complete literal filesystem path with FileLoad's normalization flags
-// before creating or activating it; case alone does not change its identity.
+// before creating it; case alone does not change its identity. Existing file
+// activation retains FileLoad's interpretation of shortcuts and directory aliases.
 // The temporary normalized copy is released; the caller retains its literal path.
 static bool _Sidebar_CheckLiteralOpenPath(HWND owner, const HPATHL path, LPCWSTR name)
 {
@@ -1283,8 +1284,7 @@ static void _Sidebar_ActivateRow(HTREEITEM item, POINT point)
         else if (kind != SIDEBAR_UNLOADED || _Sidebar_LoadChildren(item)) { TreeView_Expand(s_tree, item, TVE_EXPAND); }
     } else if (kind == SIDEBAR_FILE || kind == SIDEBAR_RECENT_ITEM) {
         HPATHL path = _Sidebar_ItemPath(item);
-        if (_Sidebar_CheckLiteralOpenPath(Globals.hwndMain, path, name)) { _Sidebar_OpenFile(path); }
-        else { Sidebar_SyncToFile(Paths.CurrentFile); }
+        _Sidebar_OpenFile(path);
         Path_Release(path);
     } else if (kind == SIDEBAR_LOADED || kind == SIDEBAR_UNLOADED) {
         if (TreeView_GetItemState(s_tree, item, TVIS_EXPANDED) & TVIS_EXPANDED) { _Sidebar_CollapseDirectory(item); }
