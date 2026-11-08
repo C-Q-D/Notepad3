@@ -42,27 +42,27 @@ Sidebar width in logical pixels at 96 DPI (range 100–4000). Layout scales this
 
 Last folder selected for the sidebar. Default: empty. Paths use the same relative-to-application and environment expansion rules as `OpenWithDir`. Restart restores the root folder, visibility, and width; expanded nodes and selection are not persisted.
 
-The following preferences are stored in the INI. They do not yet change the folder-tree UI.
+The following preferences are changed from the sidebar itself and saved with the other settings. Default values are omitted when saving.
 
 #### `SidebarSortMode=0`
 
-Stored sort order: `0` for name, `1` for extension, `2` for modification time (newest first). Values outside 0–2 are clamped when loading. Default values are omitted when saving. Source: `src/Sidebar.h` (`SIDEBAR_SORT_NAME`) and `src/Config/Config.cpp` (`LoadSettings`, `_SaveSettings`).
+Folder-tree sort order: `0` for name, `1` for extension, `2` for modification time (newest first). Folders always precede files; ties use natural name order. The `a→z` button in the sidebar status bar cycles the three modes. Values outside 0–2 are clamped when loading. Source: `src/Sidebar.h` (`SIDEBAR_SORT_NAME`) and `src/Config/Config.cpp` (`LoadSettings`, `_SaveSettings`).
 
 #### `SidebarShowHidden=1`
 
-Stored preference for showing hidden and system entries. Default: `1`.
+Show entries with the hidden or system attribute in the folder tree, its counts and filter results. Default: `1`. The `.*` button in the sidebar status bar toggles it.
 
 #### `SidebarRecentCollapsed=0`
 
-Stored collapsed state of the recent-files group. Default: `0` (expanded).
+Collapsed state of the recent-files group; clicking the group title toggles it. Default: `0` (expanded).
 
 #### `SidebarFoldersCollapsed=0`
 
-Stored collapsed state of the folders group. Default: `0` (expanded).
+Collapsed state of the folders group; clicking the group title toggles it. Default: `0` (expanded).
 
 #### `SidebarRecentHidden=`
 
-Side-panel hidden recent-file paths, separated by `|`. Default: empty. Loading retains at most the first 32 entries, including long paths. This list is stored separately from the file MRU. Verification: `test/TestSidebarSettings.ps1` starts an isolated executable, closes it normally and checks the saved INI, including default omission, non-default values, sort bounds and long-path lists.
+Recent-file paths hidden from the sidebar by its `[Clear]` action, separated by `|`. Default: empty. At most 32 entries are kept, including long paths. The list is stored separately from the file MRU, so File → Recent Files is unchanged; opening a hidden file again removes it from the list. Verification: `test/TestSidebarSettings.ps1` starts an isolated executable, closes it normally and checks the saved INI, including default omission, non-default values, sort bounds and long-path lists; the `Toggles`, `Groups` and `Recent` scenarios of `test/TestSidebarGui.ps1` cover the sidebar controls.
 
 #### `AnalyzeReliableConfidenceLevel=50`
 
