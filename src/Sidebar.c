@@ -1026,6 +1026,20 @@ static void _Sidebar_NewFileError(HWND dialog, UINT resource, LPCWSTR name)
     if (edit) { SetFocus(edit); }
 }
 
+// FileLoad and its same-file comparison interpret quotes/environment variables.
+// Check the complete literal filesystem path with FileLoad's normalization flags
+// before creating or activating it; case alone does not change its identity.
+// The temporary normalized copy is released; the caller retains its literal path.
+static bool _Sidebar_CheckLiteralOpenPath(HWND owner, const HPATHL path, LPCWSTR name)
+{
+    HPATHL const normalized = Path_Copy(path);
+    Path_NormalizeEx(normalized, Paths.WorkingDirectory, true, Flags.bSearchPathIfRelative);
+    bool const unchanged = CompareStringOrdinal(Path_Get(path), -1, Path_Get(normalized), -1, TRUE) == CSTR_EQUAL;
+    Path_Release(normalized);
+    if (!unchanged) { _Sidebar_NewFileError(owner, IDS_MUI_SIDEBAR_NAME_INVALID, name); }
+    return unchanged;
+}
+
 // Build native children in dialog units and use the same font/theme entry points
 // as resource dialogs. Enter/Esc and tab order are owned by the modal dialog loop.
 // lParam borrows SidebarNewFile until EndDialog; failures keep the input open.
@@ -1086,6 +1100,10 @@ static INT_PTR CALLBACK _Sidebar_NewFileProc(HWND dialog, UINT message, WPARAM w
             HPATHL const target = Path_Copy(state->folder);
             if (!Path_Append(target, name)) {
                 _Sidebar_NewFileError(dialog, IDS_MUI_SIDEBAR_CREATE_FAILED, name);
+                Path_Release(target);
+                return TRUE;
+            }
+            if (!_Sidebar_CheckLiteralOpenPath(dialog, target, name)) {
                 Path_Release(target);
                 return TRUE;
             }
@@ -1265,7 +1283,8 @@ static void _Sidebar_ActivateRow(HTREEITEM item, POINT point)
         else if (kind != SIDEBAR_UNLOADED || _Sidebar_LoadChildren(item)) { TreeView_Expand(s_tree, item, TVE_EXPAND); }
     } else if (kind == SIDEBAR_FILE || kind == SIDEBAR_RECENT_ITEM) {
         HPATHL path = _Sidebar_ItemPath(item);
-        _Sidebar_OpenFile(path);
+        if (_Sidebar_CheckLiteralOpenPath(Globals.hwndMain, path, name)) { _Sidebar_OpenFile(path); }
+        else { Sidebar_SyncToFile(Paths.CurrentFile); }
         Path_Release(path);
     } else if (kind == SIDEBAR_LOADED || kind == SIDEBAR_UNLOADED) {
         if (TreeView_GetItemState(s_tree, item, TVIS_EXPANDED) & TVIS_EXPANDED) { _Sidebar_CollapseDirectory(item); }

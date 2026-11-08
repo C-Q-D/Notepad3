@@ -981,6 +981,24 @@ RunCreateScenario() {
     RejectCreateName(tree, 'CON.txt', 'Enter a valid file name.')
     RejectCreateName(tree, 'trailing.', 'Enter a valid file name.')
 
+    ; These are legal Windows components, but the shared open path trims terminal
+    ; apostrophes and expands environment variables. Reject before CREATE_NEW,
+    ; even when the interpreted name already contains unrelated user content.
+    userName := EnvGet('USERNAME')
+    if userName = ''
+        throw Error('Create environment-name fixture requires USERNAME')
+    interpretedNames := ["notes.txt'", "'notes.txt'", '%USERNAME%.txt']
+    aliases := ['notes.txt', "'notes.txt", userName '.txt']
+    for index, name in interpretedNames {
+        alias := folder '\sub\' aliases[index]
+        FileAppend('unrelated alias content', alias, 'UTF-8')
+        beforeTitle := WinGetTitle(main)
+        beforeText := EditorText(editor)
+        RejectCreateName(tree, name, 'Enter a valid file name.')
+        Check(!FileExist(folder '\sub\' name) && FileRead(alias, 'UTF-8') = 'unrelated alias content', 'Create interpreted name writes nothing: ' name)
+        Check(WinGetTitle(main) = beforeTitle && EditorText(editor) = beforeText && TreeText(tree, SendMessage(0x110A, 9, 0, tree)) = 'sibling-created.txt', 'Create interpreted name preserves document and selection: ' name)
+    }
+
     dialog := OpenCreateDialog(tree)
     ControlSetText('cancelled.txt', ControlGetHwnd('Edit1', dialog))
     CreateDialogKey(dialog, 0x1B)
@@ -1018,6 +1036,53 @@ RunCreateScenario() {
     CreateDialogKey(dialog, 0x0D)
     Check(WinWaitClose(dialog, , 3), 'Create no selection confirms')
     WaitUntil(() => InStr(WinGetTitle(main), 'unselected-created.txt') && FileExist(folder '\unselected-created.txt'), 'Create no selection uses root directory')
+
+    ; Existing filesystem rows pass through the same interpreter as newly created
+    ; files. A literal apostrophe must never redirect activation to its sibling.
+    FileAppend('literal row bytes', folder "\literal-row.txt'", 'UTF-8')
+    FileAppend('unrelated row alias', folder '\literal-row.txt', 'UTF-8')
+    ClickSidebarAction(tree, 'Refresh')
+    WaitUntil(() => TreeFind(tree, "literal-row.txt'") != 0, 'Create interpreted row fixture appears')
+    beforeTitle := WinGetTitle(main)
+    beforeText := EditorText(editor)
+    ClickTree(tree, TreeFind(tree, "literal-row.txt'"))
+    warning := WinWait('New file ahk_class #32770 ahk_pid ' testPid, , 3)
+    Check(warning != 0 && InStr(WinGetText(warning), 'Enter a valid file name.'), 'Create interpreted row warns instead of opening alias')
+    PostMessage(0xF5, 0, 0, ControlGetHwnd('Button1', warning))
+    if !WinWaitClose(warning, , 3)
+        throw Error('Create interpreted-row warning did not close')
+    WaitUntil(() => TreeText(tree, SendMessage(0x110A, 9, 0, tree)) = 'unselected-created.txt', 'Create interpreted row restores current selection')
+    Check(WinGetTitle(main) = beforeTitle && EditorText(editor) = beforeText && FileRead(folder "\literal-row.txt'", 'UTF-8') = 'literal row bytes' && FileRead(folder '\literal-row.txt', 'UTF-8') = 'unrelated row alias', 'Create interpreted row preserves document and both files')
+
+    ; Creation precedes the existing save-before-switch prompt. Cancelling that
+    ; prompt keeps the dirty untitled document, while retaining the empty file.
+    PostMessage(0x111, 40000, 0, , main)
+    WaitUntil(() => !InStr(WinGetTitle(main), '.txt') && EditorText(editor) = '', 'Create cancel-save starts untitled document')
+    TypeText(editor, 'untitled creation must survive cancellation')
+    WaitUntil(() => SendMessage(2159, 0, 0, editor) != 0 && InStr(WinGetTitle(main), '*'), 'Create cancel-save starts dirty document')
+    beforeTitle := WinGetTitle(main)
+    beforeText := EditorText(editor)
+    beforeModified := SendMessage(2159, 0, 0, editor)
+    beforeSelection := SendMessage(0x110A, 9, 0, tree)
+    if beforeSelection != 0
+        throw Error('Create untitled fixture must have no current-file selection')
+    SendMessage(0x110B, 9, TreeFind(tree, 'sub'), tree)
+    dialog := OpenCreateDialog(tree)
+    ControlSetText('cancel-save-created.txt', ControlGetHwnd('Edit1', dialog))
+    CreateDialogKey(dialog, 0x0D)
+    if !WinWaitClose(dialog, , 3)
+        throw Error('Create cancel-save input did not close')
+    prompt := WinWait('ahk_class #32770 ahk_pid ' testPid, , 3)
+    Check(prompt != 0 && InStr(WinGetText(prompt), 'save'), 'Create successful creation asks before replacing dirty untitled document')
+    PostMessage(0x111, 2, 0, , prompt)
+    if !WinWaitClose(prompt, , 3)
+        throw Error('Create cancel-save prompt did not close')
+    WaitUntil(() => SendMessage(0x110A, 9, 0, tree) = beforeSelection, 'Create cancel-save restores original tree selection after refresh')
+    Check(WinGetTitle(main) = beforeTitle, 'Create cancel-save retains original document title')
+    Check(EditorText(editor) = beforeText, 'Create cancel-save retains original document content')
+    Check(SendMessage(2159, 0, 0, editor) = beforeModified, 'Create cancel-save retains modified state')
+    Check(FileExist(folder '\sub\cancel-save-created.txt') && FileGetSize(folder '\sub\cancel-save-created.txt') = 0, 'Create cancel-save retains created zero-byte file')
+    SendMessage(2014, 0, 0, editor)
     FinishSidebarScenario('Create')
 
     tree := StartSidebarScenario('', 1, folder '\a.txt')
