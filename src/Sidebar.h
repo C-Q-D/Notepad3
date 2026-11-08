@@ -23,12 +23,13 @@ void Sidebar_Layout(RECT* available);
 // Rebuild panel fonts, sizes and palette, and reapply the native tree theme after
 // theme/DPI changes. Safe before creation; never installs another tree subclass.
 void Sidebar_OnThemeChanged(void);
-// Replace the root with folder (non-null path handle). Missing folders yield an
-// empty tree without a dialog. On success the selected folder setting stores the
-// canonical long-name path, matching FileLoad's normalization of current files.
+// Replace the groups with folder (non-null path handle) as the directory group's
+// path anchor. Missing folders yield an empty tree without a dialog. On success
+// persist the canonical long-name root and restore both group collapse settings.
 void Sidebar_SetRoot(const HPATHL folder);
 // Select and reveal file within the root; clear selection outside it or when empty.
 // A missing entry in an already loaded parent triggers a local re-enumeration.
+// The first sync after rebuilding honors the persisted directory-group collapse.
 void Sidebar_SyncToFile(const HPATHL file);
 // Re-enumerate the root and restore expanded paths and selection where they exist.
 void Sidebar_Refresh(void);

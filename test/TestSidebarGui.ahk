@@ -24,9 +24,11 @@ try {
     Check(Abs(tw - 300 * dpi / 96) <= 4, 'A width is 300 logical pixels (actual ' tw ', DPI ' dpi ')')
     ; Check startup before Show/Refresh can populate or repair an empty tree.
     if Ord(through) >= Ord('B') {
-        WaitUntil(() => SendMessage(0x110A, 0, 0, tree) != 0, 'B startup root restored before any toggle')
-        root := SendMessage(0x110A, 0, 0, tree)
-        Check(TreeText(tree, root) = 'fixture', 'B startup root is test directory name')
+        Check(TreeText(tree, SendMessage(0x110A, 0, 0, tree)) = '# Recent', 'Groups recent title exists')
+        Check(TreeText(tree, FolderGroup(tree)) = '# Folders', 'Groups folders title exists')
+        WaitUntil(() => FolderGroup(tree) != 0, 'B startup root restored before any toggle')
+        root := FolderGroup(tree)
+        Check(TreeText(tree, root) = '# Folders', 'B startup root is folders group')
         WaitUntil(() => TreeText(tree, SendMessage(0x110A, 9, 0, tree)) = 'a.txt', 'B startup command line file selected before any toggle')
     }
     DragWidth(panel, 50)
@@ -45,9 +47,9 @@ try {
     PostMessage(0x111, 41066, 0, , main)
     WaitUntil(() => DllCall('IsWindowVisible', 'ptr', panel) && DllCall('IsWindowVisible', 'ptr', tree), 'A show command restores panel and tree')
     if Ord(through) >= Ord('B') {
-        root := SendMessage(0x110A, 0, 0, tree)
+        root := FolderGroup(tree)
         Check(root != 0, 'B root exists')
-        Check(TreeText(tree, root) = 'fixture', 'B root is test directory name')
+        Check(TreeText(tree, root) = '# Folders', 'B root is folders group')
         child := SendMessage(0x110A, 4, root, tree)
         Check(TreeText(tree, child) = 'sub', 'B folders sort first')
         aItem := SendMessage(0x110A, 1, child, tree)
@@ -58,13 +60,16 @@ try {
         Check(TreeText(tree, last) = 'b10.txt' && SendMessage(0x110A, 1, last, tree) = 0, 'B complete first level order')
         Check(SendMessage(0x110A, 9, 0, tree) = aItem, 'B command line file selected')
         ClickTree(tree, child, true)
-        WaitUntil(() => SendMessage(0x110A, 4, child, tree) != 0, 'B expand button loads sub')
+        WaitUntil(() => SendMessage(0x110A, 4, child, tree) != 0, 'B row click loads sub')
         inner := SendMessage(0x110A, 4, child, tree)
         Check(TreeText(tree, inner) = 'inner.txt', 'B expanding sub loads inner.txt')
         ClickTree(tree, child, true)
         WaitUntil(() => SendMessage(0x110A, 4, child, tree) = 0, 'B collapsing sub discards loaded children')
         ClickTree(tree, child, true)
         WaitUntil(() => TreeText(tree, SendMessage(0x110A, 4, child, tree)) = 'inner.txt', 'B re-expanding sub reloads contents')
+        ; Full-row folder activation now selects that folder. Restore the file
+        ; explicitly so this existing theme assertion still tests file selection.
+        SendMessage(0x110B, 9, aItem, tree)
         Loop 3
             SendMessage(0x31A, 0, 0, , main)
         WaitUntil(() => TreeText(tree, SendMessage(0x110A, 9, 0, tree)) = 'a.txt', 'B theme updates preserve current-file selection')
@@ -235,6 +240,8 @@ try {
     ControlGetPos(, , &tw, , panel)
     Check(Abs(tw - 300 * dpi / 96) <= 4, 'A restart restores 300 logical pixel width (actual ' tw ', DPI ' dpi ')')
     FinishSidebarScenario('A restart')
+    if Ord(through) >= Ord('B') && (scenario = 'All' || scenario = 'Groups')
+        RunGroupsScenario()
     if Ord(through) >= Ord('F') && (scenario = 'All' || scenario = 'ShortPath')
         RunShortPathScenario()
     if Ord(through) >= Ord('F') && (scenario = 'All' || scenario = 'OpenFolder')
@@ -249,6 +256,101 @@ try {
     }
 }
 ExitApp(exitCode)
+
+; Exercise group persistence through real clicks, normal close and fresh startup.
+; Added fixtures live only in this runner's directory, after B's exact order check.
+RunGroupsScenario() {
+    global testDir, main, testPid, testCreated, screenshotDirectory, themeName
+    DirCreate(testDir '\fixture\second\deep')
+    DirCreate(testDir '\fixture\empty')
+    FileAppend('leaf', testDir '\fixture\second\deep\leaf.txt', 'UTF-8')
+    FileAppend('[config]', testDir '\fixture\config.ini', 'UTF-8')
+    FileAppend('// header', testDir '\fixture\sample.h', 'UTF-8')
+    FileAppend('binary fixture', testDir '\fixture\module.dll', 'UTF-8')
+    tree := StartSidebarScenario(testDir '\fixture', 1, testDir '\fixture\a.txt')
+    WaitUntil(() => FolderGroup(tree) != 0, 'Groups directory group starts')
+    folders := FolderGroup(tree)
+    sub := TreeFind(tree, 'sub')
+    ClickTree(tree, sub, true)
+    WaitUntil(() => SendMessage(0x110A, 9, 0, tree) = sub && TreeText(tree, SendMessage(0x110A, 4, sub, tree)) = 'inner.txt', 'Groups row whitespace expands and selects folder')
+    ClickTree(tree, sub, true)
+    WaitUntil(() => SendMessage(0x110A, 9, 0, tree) = sub && SendMessage(0x110A, 4, sub, tree) = 0, 'Groups row whitespace collapses selected folder')
+    ClickTree(tree, sub, true)
+    second := TreeFind(tree, 'second')
+    ClickTree(tree, second, true)
+    WaitUntil(() => TreeFind(tree, 'deep', second) != 0, 'Groups second folder loads its child')
+    deep := TreeFind(tree, 'deep', second)
+    ClickTree(tree, deep, true)
+    WaitUntil(() => TreeFind(tree, 'leaf.txt', deep) != 0, 'Groups nested directory expanded before collapse all')
+    ClickTree(tree, folders, true)
+    WaitUntil(() => SendMessage(0x110A, 4, sub, tree) = 0 && SendMessage(0x110A, 4, second, tree) = 0
+        && (SendMessage(0x1127, folders, 0x20, tree) & 0x20), 'Groups collapse all clears both expanded subtrees and keeps group open')
+    ClickTree(tree, SendMessage(0x110A, 0, 0, tree))
+    ClickTree(tree, folders)
+    WaitUntil(() => !(SendMessage(0x1127, folders, 0x20, tree) & 0x20) && SendMessage(0x110A, 4, folders, tree) = 0, 'Groups title collapses directory group')
+    FinishSidebarScenario('Groups collapsed')
+    ini := testDir '\Notepad3.ini'
+    Check(ReadSetting(ini, 'SidebarFoldersCollapsed', 'false') = '1' || ReadSetting(ini, 'SidebarFoldersCollapsed', 'false') = 'true', 'Groups collapsed INI key is true')
+    Check(ReadSetting(ini, 'SidebarRecentCollapsed', 'false') = '1' || ReadSetting(ini, 'SidebarRecentCollapsed', 'false') = 'true', 'Groups recent collapsed INI key is true')
+    Check(StrLower(PersistedSidebarFolder()) = StrLower(testDir '\fixture'), 'Groups directory title keeps actual root path')
+    tree := ResumeGroupsScenario()
+    folders := FolderGroup(tree)
+    Check(!(SendMessage(0x1127, folders, 0x20, tree) & 0x20) && SendMessage(0x110A, 4, folders, tree) = 0, 'Groups collapsed state survives startup file synchronization')
+    ClickTree(tree, folders)
+    WaitUntil(() => (SendMessage(0x1127, folders, 0x20, tree) & 0x20) && TreeFind(tree, 'a.txt') != 0, 'Groups title expands directory group')
+    ClickTree(tree, SendMessage(0x110A, 0, 0, tree))
+    FinishSidebarScenario('Groups expanded')
+    Check(ReadSetting(ini, 'SidebarFoldersCollapsed', '0') = '0' || ReadSetting(ini, 'SidebarFoldersCollapsed', '0') = 'false', 'Groups expanded INI key is default false')
+    Check(ReadSetting(ini, 'SidebarRecentCollapsed', '0') = '0' || ReadSetting(ini, 'SidebarRecentCollapsed', '0') = 'false', 'Groups recent expanded INI key is default false')
+    tree := ResumeGroupsScenario()
+    folders := FolderGroup(tree)
+    Check((SendMessage(0x1127, folders, 0x20, tree) & 0x20) && TreeFind(tree, 'a.txt') != 0, 'Groups expanded state survives restart')
+    ClickTree(tree, TreeFind(tree, 'sub'), true)
+    ClickTree(tree, TreeFind(tree, 'empty'), true)
+    if screenshotDirectory != ''
+        CaptureWindow(main, screenshotDirectory '\sidebar-' StrLower(themeName) '.png')
+    ; A current-file marker must not reopen an intentionally collapsed ancestor
+    ; during refresh. A new root entry proves the posted F5 has completed.
+    sub := TreeFind(tree, 'sub')
+    SendMessage(0x1102, 2, sub, tree)
+    ClickTree(tree, TreeFind(tree, 'inner.txt', sub))
+    if !WinWait('inner.txt ahk_pid ' testPid, , 3)
+        throw Error('Groups nested current-file refresh setup did not open inner.txt')
+    ClickTree(tree, sub, true)
+    WaitUntil(() => SendMessage(0x110A, 9, 0, tree) = sub && SendMessage(0x110A, 4, sub, tree) = 0, 'Groups row whitespace collapses selected folder')
+    FileAppend('refresh barrier', testDir '\fixture\groups-refresh.txt', 'UTF-8')
+    ControlFocus(tree)
+    TreeKey(tree, 0x74)
+    WaitUntil(() => TreeFind(tree, 'groups-refresh.txt') != 0 && !(SendMessage(0x1127, TreeFind(tree, 'sub'), 0x20, tree) & 0x20)
+        && SendMessage(0x110A, 4, TreeFind(tree, 'sub'), tree) = 0, 'Groups F5 keeps current-file parent collapsed')
+    FinishSidebarScenario('Groups final')
+}
+
+; Restart without rewriting INI, so persistence is tested independently of setup.
+ResumeGroupsScenario() {
+    global testDir, main, testPid, testCreated
+    Run('"' testDir '\Notepad3.exe" /n "' testDir '\fixture\a.txt"', testDir, , &testPid)
+    testCreated := RecordProcess(testPid)
+    main := WinWait('ahk_pid ' testPid, , 10)
+    if !main
+        throw Error('Groups restart did not create a main window')
+    DllCall('SetWindowPos', 'ptr', main, 'ptr', 0, 'int', 80, 'int', 80, 'int', 1100, 'int', 750, 'uint', 0x14)
+    tree := ControlGetHwnd('SysTreeView321', main)
+    WaitUntil(() => FolderGroup(tree) != 0, 'Groups saved settings restart creates directory group')
+    return tree
+}
+
+; Find the directory group among top-level items, independently of child names.
+; Zero means the group has not been created; callers wait or assert explicitly.
+FolderGroup(tree) {
+    item := SendMessage(0x110A, 0, 0, tree)
+    while item {
+        if TreeText(tree, item) = '# Folders'
+            return item
+        item := SendMessage(0x110A, 1, item, tree)
+    }
+    return 0
+}
 
 ; Resolve the deep refresh marker using fresh tree handles on every poll, since
 ; F5 invalidates the prior generation's item handles while rebuilding the tree.
@@ -321,12 +423,12 @@ RunShortPathScenario() {
     tree := StartSidebarScenario(shortFolder, 1, folder '\' firstFile)
     WaitUntil(() => SendMessage(0x110A, 0, 0, tree) != 0, 'ShortPath startup root exists before any toggle')
     WaitUntil(() => TreeText(tree, SendMessage(0x110A, 9, 0, tree)) = firstFile, 'ShortPath startup selects long-name current file')
-    SplitPath(folder, &folderName)
-    Check(TreeText(tree, SendMessage(0x110A, 0, 0, tree)) = folderName, 'ShortPath root uses expanded long name')
+    Check(TreeText(tree, FolderGroup(tree)) = '# Folders', 'ShortPath directory group replaces root label')
     ClickTree(tree, TreeFind(tree, secondFile))
     WaitUntil(() => InStr(WinGetTitle(main), secondFile) != 0, 'ShortPath clicking opens second file')
     WaitUntil(() => TreeText(tree, SendMessage(0x110A, 9, 0, tree)) = secondFile, 'ShortPath click synchronizes long-name current file')
     FinishSidebarScenario('ShortPath')
+    Check(StrLower(PersistedSidebarFolder()) = StrLower(folder), 'ShortPath root uses expanded long name')
 }
 
 ; Open the real localized folder picker via its menu command. The dialog owner,
@@ -359,16 +461,16 @@ RunOpenFolderScenario() {
     SendMessage(0xF5, 0, 0, ControlGetHwnd('Button1', dialog))
     Check(WinWaitClose(dialog, , 5), 'OpenFolder path confirmation closes picker')
     WaitUntil(() => DllCall('IsWindowVisible', 'ptr', tree), 'OpenFolder confirm shows sidebar')
-    WaitUntil(() => TreeText(tree, SendMessage(0x110A, 0, 0, tree)) = 'fixture', 'OpenFolder confirm sets selected directory root')
+    WaitUntil(() => TreeText(tree, FolderGroup(tree)) = '# Folders' && TreeFind(tree, 'a.txt') != 0, 'OpenFolder confirm sets selected directory root')
     menu := DllCall('GetMenu', 'ptr', main, 'ptr')
     SendMessage(0x116, menu, 0, , main)
     menuState := 0
     WaitUntil(() => (menuState := DllCall('GetMenuState', 'ptr', menu, 'uint', 41066, 'uint', 0, 'uint')) != 0xffffffff && (menuState & 8) != 0, 'OpenFolder View sidebar menu is checked')
-    root := SendMessage(0x110A, 0, 0, tree)
+    root := FolderGroup(tree)
     dialog := OpenSidebarFolderDialog()
     PostMessage(0x111, 2, 0, , dialog)
     Check(WinWaitClose(dialog, , 3), 'OpenFolder visible-state Cancel closes picker')
-    WaitUntil(() => DllCall('IsWindowVisible', 'ptr', tree) && SendMessage(0x110A, 0, 0, tree) = root, 'OpenFolder Cancel preserves visible root')
+    WaitUntil(() => DllCall('IsWindowVisible', 'ptr', tree) && root != 0 && FolderGroup(tree) = root, 'OpenFolder Cancel preserves visible root')
     FinishSidebarScenario('OpenFolder')
     visible := ReadSetting(testDir '\Notepad3.ini', 'ShowSidebar')
     Check(visible = '1' || visible = 'true', 'OpenFolder visibility persisted')
@@ -510,9 +612,10 @@ CheckNoDialog(name) {
         Check(false, name)
 }
 
-; Find a named direct child of parent (zero defaults to root); zero means absent.
+; Find a named direct child of parent (zero defaults to the folder group).
+; Return zero when the group or named child is absent.
 TreeFind(tree, name, parent := 0) {
-    root := parent ? parent : SendMessage(0x110A, 0, 0, tree)
+    root := parent ? parent : FolderGroup(tree)
     item := SendMessage(0x110A, 4, root, tree)
     while item {
         if TreeText(tree, item) = name
@@ -522,10 +625,10 @@ TreeFind(tree, name, parent := 0) {
     return 0
 }
 
-; Click the real item's text rectangle using client-coordinate mouse messages.
+; Click a row using client-coordinate messages, including its far-right whitespace.
 ; The pointer stays on the user's desktop position throughout this operation.
-; expandButton targets the hit-tested directory toggle instead of its label.
-ClickTree(tree, item, expandButton := false) {
+; rowSpace replaces the native expansion button removed by the custom row design.
+ClickTree(tree, item, rowSpace := false) {
     global testPid
     Check(item != 0, 'target tree item exists')
     SendMessage(0x1114, 0, item, tree)
@@ -537,26 +640,13 @@ ClickTree(tree, item, expandButton := false) {
         data := Buffer(64, 0)
         NumPut('ptr', item, data)
         DllCall('WriteProcessMemory', 'ptr', process, 'ptr', memory, 'ptr', data, 'uptr', 64, 'ptr', 0)
-        Check(SendMessage(0x1104, 1, memory, tree), 'target tree rectangle available')
+        Check(SendMessage(0x1104, 0, memory, tree), 'target tree rectangle available')
         DllCall('ReadProcessMemory', 'ptr', process, 'ptr', memory, 'ptr', data, 'uptr', 64, 'ptr', 0)
-        x := NumGet(data, 0, 'int') + 4
+        ControlGetPos(, , &rowWidth, , tree)
+        x := rowSpace ? rowWidth - 16 : NumGet(data, 0, 'int') + 10
         y := (NumGet(data, 4, 'int') + NumGet(data, 12, 'int')) // 2
-        if expandButton {
-            found := false
-            Loop x + 1 {
-                x -= 1
-                NumPut('int', x, 'int', y, data)
-                DllCall('WriteProcessMemory', 'ptr', process, 'ptr', memory, 'ptr', data, 'uptr', 64, 'ptr', 0)
-                SendMessage(0x1111, 0, memory, tree)
-                DllCall('ReadProcessMemory', 'ptr', process, 'ptr', memory, 'ptr', data, 'uptr', 64, 'ptr', 0)
-                if (NumGet(data, 8, 'uint') & 0x10) && NumGet(data, 16, 'ptr') = item {
-                    found := true
-                    break
-                }
-            }
-            Check(found, 'target expansion button hit tested')
-        }
         point := (y << 16) | (x & 0xffff)
+        PostMessage(0x200, 0, point, tree)
         PostMessage(0x201, 1, point, tree)
         PostMessage(0x202, 0, point, tree)
     } finally {

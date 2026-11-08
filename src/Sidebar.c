@@ -1,8 +1,7 @@
 // Folder sidebar panel, native tree and navigation policies. File I/O remains
-// owned by Notepad3; custom tree rows and filtering are separate from this shell.
+// owned by Notepad3. Tree rows keep filesystem names separate from their drawing.
 #include "Helpers.h"
 #include <shlwapi.h>
-#include <shellapi.h>
 #include <stdlib.h>
 #include "Sidebar.h"
 #include "SidebarDrawing.h"
@@ -23,21 +22,30 @@ static int s_hover = 0;
 static RECT s_filterRect, s_newRect, s_refreshRect, s_hiddenRect, s_sortRect;
 static int _Sidebar_ClampWidth(int logicalWidth, int clientWidth, UINT dpi);
 static void _Sidebar_UpdateChrome(void);
+static int _Sidebar_Pixels(int logical);
+static HTREEITEM _Sidebar_RowAt(POINT point);
+static void _Sidebar_ActivateRow(HTREEITEM item, POINT point);
+static HTREEITEM s_recent = NULL, s_folders = NULL, s_currentItem = NULL, s_hotItem = NULL, s_pressedItem = NULL;
+static UINT s_rootDirectories = 0, s_rootFiles = 0;
+static bool s_restoreGroupCollapse = false;
 
 // Opaque colors include the specified alpha blended against each local surface.
 typedef struct SidebarPalette {
     COLORREF island, border, text, title, secondary, accent, button, buttonHot;
     COLORREF filter, filterFocus, filterHotBorder, filterFocusBorder, status, divider, textHot;
+    COLORREF weak, prefix, folder, ini, source, binary, selected, rowHot;
 } SidebarPalette;
 static SidebarPalette const s_darkPalette = {
     RGB(18,20,18), RGB(32,34,32), RGB(201,209,201), RGB(238,243,238), RGB(139,148,158), RGB(126,231,135),
     RGB(27,31,27), RGB(37,43,37), RGB(26,30,26), RGB(21,25,21), RGB(38,48,38), RGB(63,92,65),
-    RGB(15,17,15), RGB(27,32,27), RGB(28,32,28)
+    RGB(15,17,15), RGB(27,32,27), RGB(28,32,28),
+    RGB(125,134,125), RGB(63,74,63), RGB(121,192,255), RGB(210,168,255), RGB(255,166,87), RGB(139,148,158), RGB(31,38,31), RGB(24,28,24)
 };
 static SidebarPalette const s_lightPalette = {
     RGB(251,252,251), RGB(226,227,226), RGB(36,41,47), RGB(31,35,40), RGB(87,96,106), RGB(26,127,55),
     RGB(236,238,236), RGB(227,234,227), RGB(236,238,236), RGB(238,242,238), RGB(196,204,196), RGB(26,127,55),
-    RGB(239,242,239), RGB(225,229,225), RGB(227,234,227)
+    RGB(239,242,239), RGB(225,229,225), RGB(227,234,227),
+    RGB(110,119,129), RGB(196,204,196), RGB(9,105,218), RGB(130,80,223), RGB(188,76,0), RGB(140,149,159), RGB(227,234,227), RGB(238,242,238)
 };
 static SidebarPalette const* s_palette = &s_lightPalette;
 
@@ -52,36 +60,33 @@ static COLORREF _Sidebar_Background(void)
     return UseDarkMode() ? RGB(12,13,12) : GetSysColor(COLOR_WINDOW);
 }
 
-// Icon indices belong to the shared Shell image list; never destroy that list.
-typedef struct SidebarIcon {
-    WCHAR extension[MAX_PATH_EXPLICIT];
-    int index;
-} SidebarIcon;
-static SidebarIcon s_icons[256];
-static size_t s_iconCount = 0;
-static int s_folderIcon = 0;
-static POINT s_clickPoint;
-static bool s_clickPointValid = false;
-static bool s_syncAfterClick = false;
-
-// Keep the client coordinates of the mouse message that produces NM_CLICK.
-// Using its lParam also works when the window receives directed input messages.
+// Own full-row mouse activation so native label/button hit zones cannot toggle
+// directories twice. Keyboard navigation remains in the native TreeView.
 static LRESULT CALLBACK _Sidebar_TreeProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR id, DWORD_PTR data)
 {
     UNREFERENCED_PARAMETER(id);
     UNREFERENCED_PARAMETER(data);
-    if (message == WM_LBUTTONDOWN || message == WM_LBUTTONUP) {
-        s_clickPoint.x = GET_X_LPARAM(lParam);
-        s_clickPoint.y = GET_Y_LPARAM(lParam);
-        s_clickPointValid = true;
-        LRESULT const result = DefSubclassProc(hwnd, message, wParam, lParam);
-        s_clickPointValid = false;
-        if (s_syncAfterClick) {
-            // Native click selection happens after NM_CLICK; restore only after it finishes.
-            s_syncAfterClick = false;
-            Sidebar_SyncToFile(Paths.CurrentFile);
+    POINT const point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+    if (message == WM_LBUTTONDOWN) {
+        SetFocus(hwnd);
+        s_pressedItem = _Sidebar_RowAt(point);
+        if (s_pressedItem) { TreeView_SelectItem(hwnd, s_pressedItem); }
+        return 0;
+    }
+    if (message == WM_LBUTTONUP) {
+        HTREEITEM const pressed = s_pressedItem;
+        s_pressedItem = NULL;
+        if (pressed && pressed == _Sidebar_RowAt(point)) { _Sidebar_ActivateRow(pressed, point); }
+        return 0;
+    }
+    if (message == WM_LBUTTONDBLCLK) { return 0; }
+    if (message == WM_MOUSEMOVE || message == WM_MOUSELEAVE) {
+        HTREEITEM const hot = message == WM_MOUSELEAVE ? NULL : _Sidebar_RowAt(point);
+        if (s_hotItem != hot) { s_hotItem = hot; InvalidateRect(hwnd, NULL, FALSE); }
+        if (message == WM_MOUSEMOVE) {
+            TRACKMOUSEEVENT tracking = { sizeof(tracking), TME_LEAVE, hwnd, 0 };
+            TrackMouseEvent(&tracking);
         }
-        return result;
     }
     if (message == WM_NCDESTROY) {
         RemoveWindowSubclass(hwnd, _Sidebar_TreeProc, 0);
@@ -90,9 +95,10 @@ static LRESULT CALLBACK _Sidebar_TreeProc(HWND hwnd, UINT message, WPARAM wParam
     return DefSubclassProc(hwnd, message, wParam, lParam);
 }
 
-// lParam encodes only node kind/loading state. Full paths are reconstructed from
-// ancestors so large trees do not retain a second path string for every entry.
-enum { SIDEBAR_FILE = 0, SIDEBAR_UNLOADED = 1, SIDEBAR_LOADED = 2 };
+// Low four bits hold kind/loading state; upper bits store count+1 (zero means
+// uncounted, 1000 means 999+). Tree deletion owns all metadata, without allocations.
+enum { SIDEBAR_FILE = 0, SIDEBAR_UNLOADED = 1, SIDEBAR_LOADED = 2, SIDEBAR_RECENT = 3, SIDEBAR_EMPTY = 4,
+       SIDEBAR_KIND_MASK = 15, SIDEBAR_COUNT_SHIFT = 4, SIDEBAR_COUNT_LIMIT = 1000, SIDEBAR_COUNT_FOLDERS = 256 };
 
 // Read an existing item's name and kind into MAX_PATH_EXPLICIT WCHARs of storage.
 // False means that the item no longer exists; no returned buffer is borrowed.
@@ -104,11 +110,12 @@ static bool _Sidebar_GetItem(HTREEITEM item, LPWSTR name, LPARAM* kind)
     value.pszText = name;
     value.cchTextMax = MAX_PATH_EXPLICIT;
     bool const found = TreeView_GetItem(s_tree, &value) != FALSE;
-    *kind = value.lParam;
+    *kind = value.lParam & SIDEBAR_KIND_MASK;
     return found;
 }
 
-// Return a new owned path for item, or an empty handle for NULL. The caller releases it.
+// Return an owned path for an item under the directory group, including that
+// group's root path. NULL and other top-level groups yield an empty handle.
 static HPATHL _Sidebar_ItemPath(HTREEITEM item)
 {
     HPATHL result = Path_Allocate(NULL);
@@ -116,7 +123,7 @@ static HPATHL _Sidebar_ItemPath(HTREEITEM item)
         return result;
     }
     HSTRINGW relative = StrgCreate(NULL);
-    HTREEITEM const root = TreeView_GetRoot(s_tree);
+    HTREEITEM const root = s_folders;
     while (item && item != root) {
         WCHAR name[MAX_PATH_EXPLICIT];
         LPARAM kind;
@@ -130,37 +137,16 @@ static HPATHL _Sidebar_ItemPath(HTREEITEM item)
         StrgInsert(relative, 0, name);
         item = TreeView_GetParent(s_tree, item);
     }
+    if (item != root || !root) {
+        StrgDestroy(relative);
+        return result;
+    }
     Path_Reset(result, Path_Get(Settings.SidebarFolder));
     if (StrgGetLength(relative)) {
         Path_Append(result, StrgGet(relative));
     }
     StrgDestroy(relative);
     return result;
-}
-
-// Resolve a file-type icon without touching the file. Cache up to 256 extensions;
-// uncommon extensions beyond that bound are still resolved using the Shell API.
-static int _Sidebar_Icon(LPCWSTR name, bool directory)
-{
-    if (directory) {
-        return s_folderIcon;
-    }
-    LPCWSTR const extension = PathFindExtensionW(name);
-    for (size_t i = 0; i < s_iconCount; ++i) {
-        if (CompareStringOrdinal(extension, -1, s_icons[i].extension, -1, TRUE) == CSTR_EQUAL) {
-            return s_icons[i].index;
-        }
-    }
-    WCHAR lookup[MAX_PATH_EXPLICIT + 8];
-    StringCchPrintf(lookup, COUNTOF(lookup), L"file%s", extension);
-    SHFILEINFOW info = { 0 };
-    SHGetFileInfoW(lookup, FILE_ATTRIBUTE_NORMAL, &info, sizeof(info),
-                  SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
-    if (s_iconCount < COUNTOF(s_icons)) {
-        StringCchCopy(s_icons[s_iconCount].extension, COUNTOF(s_icons[s_iconCount].extension), extension);
-        s_icons[s_iconCount++].index = info.iIcon;
-    }
-    return info.iIcon;
 }
 
 // Insert one enumerated name under parent; directory nodes get a lazy-load marker.
@@ -170,11 +156,11 @@ static HTREEITEM _Sidebar_Insert(HTREEITEM parent, LPCWSTR name, bool directory)
     TVINSERTSTRUCTW entry = { 0 };
     entry.hParent = parent;
     entry.hInsertAfter = TVI_LAST;
-    entry.item.mask = TVIF_TEXT | TVIF_PARAM | TVIF_IMAGE | TVIF_SELECTEDIMAGE | TVIF_CHILDREN;
+    entry.item.mask = TVIF_TEXT | TVIF_PARAM | TVIF_CHILDREN | TVIF_INTEGRAL;
     entry.item.pszText = (LPWSTR)name;
     entry.item.lParam = directory ? SIDEBAR_UNLOADED : SIDEBAR_FILE;
-    entry.item.iImage = entry.item.iSelectedImage = _Sidebar_Icon(name, directory);
     entry.item.cChildren = directory ? 1 : 0;
+    entry.itemex.iIntegral = parent == TVI_ROOT ? 3 : 2;
     return TreeView_InsertItem(s_tree, &entry);
 }
 
@@ -191,13 +177,17 @@ static void _Sidebar_ClearChildren(HTREEITEM parent)
 // Reset both the lazy-load marker and children for every collapse entry point.
 static void _Sidebar_CollapseDirectory(HTREEITEM item)
 {
+    if (item == s_folders) { Settings.SidebarFoldersCollapsed = true; }
     TVITEMW state = { 0 };
-    state.mask = TVIF_PARAM | TVIF_CHILDREN;
+    state.mask = TVIF_PARAM;
     state.hItem = item;
-    state.lParam = SIDEBAR_UNLOADED;
+    TreeView_GetItem(s_tree, &state);
+    state.mask |= TVIF_CHILDREN;
+    state.lParam = (state.lParam & ~SIDEBAR_KIND_MASK) | SIDEBAR_UNLOADED;
     state.cChildren = 1;
     TreeView_SetItem(s_tree, &state);
     TreeView_Expand(s_tree, item, TVE_COLLAPSE | TVE_COLLAPSERESET);
+    _Sidebar_ClearChildren(item);
 }
 
 // Resize only while this splitter owns mouse capture. Coordinates are converted
@@ -379,8 +369,28 @@ static int __cdecl _Sidebar_CompareFindData(const void* left, const void* right)
                                    (b->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0, b->cFileName);
 }
 
-// Enumerate one directory synchronously. On allocation or enumeration failure,
-// retain the unloaded state so a later expansion can retry; never show a dialog.
+// Count just one level, stopping at 1000 (displayed as 999+). An inaccessible
+// directory returns -1, which omits the count rather than claiming it is empty.
+static int _Sidebar_CountChildren(const HPATHL folder)
+{
+    HPATHL pattern = Path_Copy(folder);
+    Path_Append(pattern, L"*");
+    WIN32_FIND_DATAW data;
+    HANDLE const search = Path_FindFirstFile(pattern, &data);
+    DWORD const error = GetLastError();
+    Path_Release(pattern);
+    if (search == INVALID_HANDLE_VALUE) { return error == ERROR_FILE_NOT_FOUND ? 0 : -1; }
+    int count = 0;
+    do {
+        if (wcscmp(data.cFileName, L".") && wcscmp(data.cFileName, L"..")) { ++count; }
+    } while (count < SIDEBAR_COUNT_LIMIT && FindNextFileW(search, &data));
+    bool const success = count == SIDEBAR_COUNT_LIMIT || GetLastError() == ERROR_NO_MORE_FILES;
+    FindClose(search);
+    return success ? count : -1;
+}
+
+// Enumerate the parent's direct entries, then count one level per child directory
+// only when there are at most 256 such directories. No recursive count or paint I/O.
 static bool _Sidebar_LoadChildren(HTREEITEM parent)
 {
     HPATHL pattern = _Sidebar_ItemPath(parent);
@@ -424,18 +434,51 @@ static bool _Sidebar_LoadChildren(HTREEITEM parent)
             qsort(entries, count, sizeof(*entries), _Sidebar_CompareFindData);
         }
         _Sidebar_ClearChildren(parent);
+        size_t directories = 0;
+        while (directories < count && (entries[directories].dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) { ++directories; }
+        if (parent == s_folders) { s_rootDirectories = (UINT)directories; s_rootFiles = (UINT)(count - directories); }
         for (size_t i = 0; i < count; ++i) {
-            if (!_Sidebar_Insert(parent, entries[i].cFileName, (entries[i].dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)) {
+            bool const directory = (entries[i].dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+            HTREEITEM const inserted = _Sidebar_Insert(parent, entries[i].cFileName, directory);
+            if (!inserted) {
                 success = false;
                 break;
             }
+            if (directory && directories <= SIDEBAR_COUNT_FOLDERS) {
+                HPATHL path = _Sidebar_ItemPath(inserted);
+                int const children = _Sidebar_CountChildren(path);
+                Path_Release(path);
+                TVITEMW metadata = { 0 };
+                metadata.mask = TVIF_PARAM;
+                metadata.hItem = inserted;
+                metadata.lParam = SIDEBAR_UNLOADED | ((LPARAM)(children + 1) << SIDEBAR_COUNT_SHIFT);
+                TreeView_SetItem(s_tree, &metadata);
+            } else if (!directory && Path_IsNotEmpty(Paths.CurrentFile)) {
+                // Re-expanding a folder restores its current-file marker without
+                // doing path reconstruction for every row on every paint.
+                HPATHL path = _Sidebar_ItemPath(inserted);
+                if (Path_StrgComparePath(path, Paths.CurrentFile, Paths.WorkingDirectory, true) == 0) { s_currentItem = inserted; }
+                Path_Release(path);
+            }
         }
         TVITEMW state = { 0 };
-        state.mask = TVIF_PARAM | TVIF_CHILDREN;
+        state.mask = TVIF_PARAM;
         state.hItem = parent;
-        state.lParam = success ? SIDEBAR_LOADED : SIDEBAR_UNLOADED;
-        state.cChildren = count ? 1 : 0;
+        TreeView_GetItem(s_tree, &state);
+        state.mask |= TVIF_CHILDREN;
+        state.lParam = (state.lParam & ~SIDEBAR_KIND_MASK) | (success ? SIDEBAR_LOADED : SIDEBAR_UNLOADED);
+        state.cChildren = 1;
         TreeView_SetItem(s_tree, &state);
+        if (success && !count) {
+            WCHAR empty[128];
+            GetLngString(IDS_MUI_SIDEBAR_EMPTY_ITEM, empty, COUNTOF(empty));
+            HTREEITEM const item = _Sidebar_Insert(parent, empty, false);
+            TVITEMW marker = { 0 };
+            marker.mask = TVIF_PARAM;
+            marker.hItem = item;
+            marker.lParam = SIDEBAR_EMPTY;
+            success = item && TreeView_SetItem(s_tree, &marker);
+        }
     }
     FreeMem(entries);
     SendMessage(s_tree, WM_SETREDRAW, TRUE, 0);
@@ -547,7 +590,7 @@ static inline bool _Sidebar_AbbreviateFolder(LPCWSTR root, LPCWSTR folder, LPWST
 // When refreshMissing is true, retry a missing child once in its loaded parent.
 static HTREEITEM _Sidebar_FindPath(const HPATHL path, bool refreshMissing)
 {
-    HTREEITEM parent = TreeView_GetRoot(s_tree);
+    HTREEITEM parent = s_folders;
     LPCWSTR part = _Sidebar_RelativePath(Path_Get(Settings.SidebarFolder), Path_Get(path));
     if (!parent || !part) {
         return NULL;
@@ -598,16 +641,30 @@ void Sidebar_SetRoot(const HPATHL folder)
     }
     HPATHL normalized = Path_Copy(folder);
     TreeView_DeleteAllItems(s_tree);
+    s_recent = s_folders = NULL;
+    s_rootDirectories = s_rootFiles = 0;
     if (Path_IsExistingDirectory(normalized)) {
         Path_CanonicalizeEx(normalized, Paths.WorkingDirectory);
         // FileLoad expands 8.3 names too; both roots and item paths must use
         // that spelling before current-file containment and selection matching.
         Path_GetLongPathNameEx(normalized);
         Path_Reset(Settings.SidebarFolder, Path_Get(normalized));
-        LPCWSTR const name = Path_FindFileName(normalized);
-        HTREEITEM const root = _Sidebar_Insert(TVI_ROOT, *name ? name : Path_Get(normalized), true);
-        if (root) {
-            TreeView_Expand(s_tree, root, TVE_EXPAND);
+        WCHAR title[128];
+        GetLngString(IDS_MUI_SIDEBAR_RECENT_TITLE, title, COUNTOF(title));
+        s_recent = _Sidebar_Insert(TVI_ROOT, title, false);
+        TVITEMW recent = { 0 };
+        recent.mask = TVIF_PARAM | TVIF_STATE;
+        recent.hItem = s_recent;
+        recent.lParam = SIDEBAR_RECENT;
+        recent.stateMask = TVIS_EXPANDED;
+        recent.state = Settings.SidebarRecentCollapsed ? 0 : TVIS_EXPANDED;
+        TreeView_SetItem(s_tree, &recent);
+        GetLngString(IDS_MUI_SIDEBAR_FOLDERS_TITLE, title, COUNTOF(title));
+        s_folders = _Sidebar_Insert(TVI_ROOT, title, true);
+        s_restoreGroupCollapse = Settings.SidebarFoldersCollapsed;
+        if (s_folders && _Sidebar_LoadChildren(s_folders)) {
+            if (s_restoreGroupCollapse) { _Sidebar_CollapseDirectory(s_folders); }
+            else { TreeView_Expand(s_tree, s_folders, TVE_EXPAND); }
         }
     }
     Path_Release(normalized);
@@ -617,14 +674,19 @@ void Sidebar_SetRoot(const HPATHL folder)
 void Sidebar_SyncToFile(const HPATHL file)
 {
     if (s_panel) { InvalidateRect(s_panel, NULL, FALSE); }
-    if (!s_tree || !Settings.ShowSidebar || !TreeView_GetRoot(s_tree)) {
+    if (!s_tree || !Settings.ShowSidebar || !s_folders) {
         return;
     }
+    // Startup's first sync must not undo the persisted group collapse. A later
+    // file activation still expands its ancestors through the normal path.
+    if (s_restoreGroupCollapse) { s_restoreGroupCollapse = false; return; }
     HTREEITEM const item = Path_IsNotEmpty(file) ? _Sidebar_FindPath(file, true) : NULL;
+    s_currentItem = item;
     TreeView_SelectItem(s_tree, item);
     if (item) {
         TreeView_EnsureVisible(s_tree, item);
     }
+    InvalidateRect(s_tree, NULL, FALSE);
 }
 
 // Temporary refresh state owns its paths only until the tree has been rebuilt.
@@ -635,12 +697,13 @@ typedef struct SidebarExpanded {
 
 void Sidebar_Refresh(void)
 {
-    if (!s_tree || !TreeView_GetRoot(s_tree)) {
+    if (!s_tree || !s_folders) {
         return;
     }
+    bool const recentSelected = TreeView_GetSelection(s_tree) == s_recent;
     HPATHL selected = _Sidebar_ItemPath(TreeView_GetSelection(s_tree));
     SidebarExpanded* expanded = NULL;
-    HTREEITEM const root = TreeView_GetRoot(s_tree);
+    HTREEITEM const root = s_folders;
     bool const rootExpanded = (TreeView_GetItemState(s_tree, root, TVIS_EXPANDED) & TVIS_EXPANDED) != 0;
     HTREEITEM item = root;
     while (item) {
@@ -677,9 +740,12 @@ void Sidebar_Refresh(void)
         FreeMem(expanded);
         expanded = next;
     }
-    TreeView_SelectItem(s_tree, Path_IsNotEmpty(selected) ? _Sidebar_FindPath(selected, false) : NULL);
+    s_restoreGroupCollapse = false;
+    // Child enumeration already restores the current-file handle where visible;
+    // looking up that file here would reopen an intentionally collapsed parent.
+    TreeView_SelectItem(s_tree, recentSelected ? s_recent : (Path_IsNotEmpty(selected) ? _Sidebar_FindPath(selected, false) : NULL));
     if (!rootExpanded) {
-        _Sidebar_CollapseDirectory(TreeView_GetRoot(s_tree));
+        _Sidebar_CollapseDirectory(s_folders);
     }
     Path_Release(selected);
 }
@@ -720,40 +786,222 @@ sync:
     return loaded;
 }
 
-// Handle tree expansion and file activation on the panel's UI thread. Return the
-// TreeView notification result, including cancellation when enumeration fails.
+// Return the visible row at a client point, including blank space to its right.
+// Only visible rows are inspected; outside the tree's client rectangle yields NULL.
+static HTREEITEM _Sidebar_RowAt(POINT point)
+{
+    RECT client;
+    GetClientRect(s_tree, &client);
+    if (!PtInRect(&client, point)) { return NULL; }
+    for (HTREEITEM item = TreeView_GetFirstVisible(s_tree); item; item = TreeView_GetNextVisible(s_tree, item)) {
+        RECT row;
+        if (!TreeView_GetItemRect(s_tree, item, &row, FALSE)) { break; }
+        if (row.top > point.y) { break; }
+        if (row.bottom > point.y) { return item; }
+    }
+    return NULL;
+}
+
+// The hover action occupies the right edge of the group row, measured with the
+// same font used to draw it; this remains a real mouse hit zone at any DPI.
+static RECT _Sidebar_CollapseRect(HDC dc, RECT row)
+{
+    WCHAR text[128];
+    GetLngString(IDS_MUI_SIDEBAR_COLLAPSE_ALL, text, COUNTOF(text));
+    row.right -= _Sidebar_Pixels(10);
+    row.left = max_i(_Sidebar_Pixels(10), row.right - SidebarDrawing_Measure(dc, s_drawing, text, SidebarFontSmall));
+    return row;
+}
+
+// Collapse each top-level directory, retaining the group itself. Lazy reset
+// discards all descendants at once, so this does not recurse down deep paths.
+static void _Sidebar_CollapseAll(HTREEITEM parent)
+{
+    for (HTREEITEM child = TreeView_GetChild(s_tree, parent); child; child = TreeView_GetNextSibling(s_tree, child)) {
+        WCHAR name[MAX_PATH_EXPLICIT];
+        LPARAM kind;
+        if (_Sidebar_GetItem(child, name, &kind) && (kind == SIDEBAR_LOADED || kind == SIDEBAR_UNLOADED)) {
+            _Sidebar_CollapseDirectory(child);
+        }
+    }
+}
+
+// Activate the hit row on mouse release or Enter. A group is never a filename;
+// selection and current document stay separate for directory/group activation.
+// A negative point.x denotes keyboard activation and skips the header action.
+static void _Sidebar_ActivateRow(HTREEITEM item, POINT point)
+{
+    WCHAR name[MAX_PATH_EXPLICIT];
+    LPARAM kind;
+    if (!_Sidebar_GetItem(item, name, &kind)) { return; }
+    if (item == s_recent) {
+        Settings.SidebarRecentCollapsed = !Settings.SidebarRecentCollapsed;
+        TVITEMW state = { 0 };
+        state.mask = TVIF_STATE;
+        state.hItem = item;
+        state.stateMask = TVIS_EXPANDED;
+        state.state = Settings.SidebarRecentCollapsed ? 0 : TVIS_EXPANDED;
+        TreeView_SetItem(s_tree, &state);
+    } else if (item == s_folders && point.x >= 0) {
+        RECT row;
+        TreeView_GetItemRect(s_tree, item, &row, FALSE);
+        RECT client;
+        GetClientRect(s_tree, &client);
+        row.right = client.right;
+        HDC dc = GetDC(s_tree);
+        RECT const action = _Sidebar_CollapseRect(dc, row);
+        ReleaseDC(s_tree, dc);
+        if (PtInRect(&action, point)) { _Sidebar_CollapseAll(s_folders); }
+        else if (TreeView_GetItemState(s_tree, item, TVIS_EXPANDED) & TVIS_EXPANDED) { _Sidebar_CollapseDirectory(item); }
+        else if (kind != SIDEBAR_UNLOADED || _Sidebar_LoadChildren(item)) { TreeView_Expand(s_tree, item, TVE_EXPAND); }
+    } else if (kind == SIDEBAR_FILE) {
+        HPATHL path = _Sidebar_ItemPath(item);
+        _Sidebar_OpenFile(path);
+        Path_Release(path);
+    } else if (kind == SIDEBAR_LOADED || kind == SIDEBAR_UNLOADED) {
+        if (TreeView_GetItemState(s_tree, item, TVIS_EXPANDED) & TVIS_EXPANDED) { _Sidebar_CollapseDirectory(item); }
+        else if (kind != SIDEBAR_UNLOADED || _Sidebar_LoadChildren(item)) { TreeView_Expand(s_tree, item, TVE_EXPAND); }
+    }
+    InvalidateRect(s_tree, NULL, FALSE);
+}
+
+// Paint one complete row using cached metadata only. Names remain native item
+// text for navigation/accessibility; prefixes, counts and states are presentation.
+static void _Sidebar_DrawRow(NMTVCUSTOMDRAW* draw)
+{
+    HTREEITEM const item = (HTREEITEM)draw->nmcd.dwItemSpec;
+    WCHAR name[MAX_PATH_EXPLICIT];
+    LPARAM kind;
+    if (!s_drawing || !_Sidebar_GetItem(item, name, &kind)) { return; }
+    RECT row, client;
+    GetClientRect(s_tree, &client);
+    if (!TreeView_GetItemRect(s_tree, item, &row, FALSE)) { return; }
+    row.left = 0;
+    row.right = client.right;
+    HDC const dc = draw->nmcd.hdc;
+    int const saved = SaveDC(dc);
+    IntersectClipRect(dc, row.left, row.top, row.right, row.bottom);
+    SidebarPalette const* p = s_palette;
+    SetDCBrushColor(dc, p->island);
+    FillRect(dc, &row, GetStockObject(DC_BRUSH));
+    bool const current = item == s_currentItem;
+    bool const group = item == s_recent || item == s_folders;
+    bool const expanded = (TreeView_GetItemState(s_tree, item, TVIS_EXPANDED) & TVIS_EXPANDED) != 0;
+    COLORREF const background = current ? RGB(126,231,135) :
+                                (item == TreeView_GetSelection(s_tree) && !group ? p->selected : (item == s_hotItem && !group ? p->rowHot : CLR_INVALID));
+    if (background != CLR_INVALID) {
+        SidebarDrawing_RoundRect(dc, row, _Sidebar_Pixels(7), Sidebar_GetStrokeWidth(s_dpi), background, CLR_INVALID);
+    }
+    RECT text = row;
+    text.left += _Sidebar_Pixels(10);
+    text.right -= _Sidebar_Pixels(10);
+    if (group) {
+        WCHAR title[256];
+        bool const collapsed = item == s_recent ? Settings.SidebarRecentCollapsed : !expanded;
+        StringCchPrintf(title, COUNTOF(title), L"%s  %s", name, collapsed ? L"+" : L"\x2212");
+        SidebarDrawing_Text(dc, s_drawing, title, SidebarFontSmall, text, p->secondary);
+        if (item == s_folders) {
+            WCHAR right[128];
+            if (item == s_hotItem) { GetLngString(IDS_MUI_SIDEBAR_COLLAPSE_ALL, right, COUNTOF(right)); }
+            else {
+                WCHAR format[128];
+                GetLngString(IDS_MUI_SIDEBAR_COUNTS, format, COUNTOF(format));
+                StringCchPrintf(right, COUNTOF(right), format, s_rootDirectories, s_rootFiles);
+            }
+            int const titleWidth = SidebarDrawing_Measure(dc, s_drawing, title, SidebarFontSmall);
+            text.left = max_i(text.left + titleWidth + _Sidebar_Pixels(8), text.right - SidebarDrawing_Measure(dc, s_drawing, right, SidebarFontSmall));
+            SidebarDrawing_Text(dc, s_drawing, right, SidebarFontSmall, text, item == s_hotItem ? p->accent : p->weak);
+        }
+    } else {
+        // The 32768-character Windows path limit bounds depth as well. Allocate
+        // only while drawing the row; no per-node path/prefix copies are retained.
+        size_t depth = 0;
+        HTREEITEM parent = TreeView_GetParent(s_tree, item);
+        for (HTREEITEM node = parent; node && node != s_folders; node = TreeView_GetParent(s_tree, node)) { ++depth; }
+        bool* ancestors = depth ? AllocMem(depth * sizeof(*ancestors), 0) : NULL;
+        WCHAR* prefix = AllocMem((depth * 3 + 4) * sizeof(*prefix), 0);
+        if (prefix && (!depth || ancestors)) {
+            size_t index = depth;
+            for (HTREEITEM node = parent; index; node = TreeView_GetParent(s_tree, node)) {
+                ancestors[--index] = TreeView_GetNextSibling(s_tree, node) == NULL;
+            }
+            if (_Sidebar_BuildPrefix(ancestors, depth, TreeView_GetNextSibling(s_tree, item) == NULL, prefix, depth * 3 + 4)) {
+                int const prefixWidth = SidebarDrawing_Measure(dc, s_drawing, prefix, SidebarFontBody);
+                RECT prefixBounds = text;
+                prefixBounds.right = prefixBounds.left + prefixWidth;
+                // Preserve the connector geometry at deep levels: the row clip
+                // trims overflow, while filenames alone receive an ellipsis.
+                SidebarDrawing_Text(dc, s_drawing, prefix, SidebarFontBody, prefixBounds, current ? RGB(68,123,72) : p->prefix);
+                text.left += prefixWidth;
+            }
+        }
+        FreeMem(prefix);
+        FreeMem(ancestors);
+        COLORREF color = p->text;
+        bool const directory = kind == SIDEBAR_UNLOADED || kind == SIDEBAR_LOADED;
+        if (directory) { color = p->folder; }
+        else if (kind == SIDEBAR_EMPTY) { color = p->weak; }
+        else if (_Sidebar_IsBinary(name)) { color = p->binary; }
+        else if (!_wcsicmp(PathFindExtensionW(name), L".ini")) { color = p->ini; }
+        else if (!_wcsicmp(PathFindExtensionW(name), L".h") || !_wcsicmp(PathFindExtensionW(name), L".c")) { color = p->source; }
+        if (current) {
+            WCHAR editing[128];
+            GetLngString(IDS_MUI_SIDEBAR_EDITING, editing, COUNTOF(editing));
+            RECT state = text;
+            state.left = max_i(text.left, text.right - SidebarDrawing_Measure(dc, s_drawing, editing, SidebarFontSmall));
+            SidebarDrawing_Text(dc, s_drawing, editing, SidebarFontSmall, state, RGB(11,12,11));
+            text.right = max_i(text.left, state.left - _Sidebar_Pixels(8));
+            color = RGB(11,12,11);
+        }
+        WCHAR label[MAX_PATH_EXPLICIT + 2];
+        StringCchPrintf(label, COUNTOF(label), L"%s%s", name, directory ? L"/" : L"");
+        SidebarFont const font = directory || current ? SidebarFontBold : SidebarFontBody;
+        SidebarDrawing_Text(dc, s_drawing, label, font, text, color);
+        if (directory && !expanded) {
+            TVITEMW data = { 0 };
+            data.mask = TVIF_PARAM;
+            data.hItem = item;
+            TreeView_GetItem(s_tree, &data);
+            int const count = (int)(data.lParam >> SIDEBAR_COUNT_SHIFT) - 1;
+            if (count >= 0) {
+                WCHAR suffix[128], format[128];
+                GetLngString(count == 0 ? IDS_MUI_SIDEBAR_EMPTY_FOLDER : (count >= SIDEBAR_COUNT_LIMIT ? IDS_MUI_SIDEBAR_CHILD_COUNT_MORE : IDS_MUI_SIDEBAR_CHILD_COUNT), format, COUNTOF(format));
+                StringCchPrintf(suffix, COUNTOF(suffix), format, min_i(count, SIDEBAR_COUNT_LIMIT - 1));
+                text.left += SidebarDrawing_Measure(dc, s_drawing, label, font);
+                SidebarDrawing_Text(dc, s_drawing, suffix, SidebarFontBody, text, p->weak);
+            }
+        }
+    }
+    RestoreDC(dc, saved);
+}
+
+// Handle drawing, expansion and deletion on the panel's UI thread. Expansion
+// errors cancel the native operation; every deleted handle loses cached state.
 static LRESULT _Sidebar_OnNotify(const NMHDR* notification)
 {
     if (notification->hwndFrom != s_tree) {
         return 0;
     }
-    if (notification->code == NM_CLICK) {
-        TVHITTESTINFO hit = { 0 };
-        if (s_clickPointValid) {
-            hit.pt = s_clickPoint;
-        } else {
-            DWORD const position = GetMessagePos();
-            hit.pt.x = GET_X_LPARAM(position);
-            hit.pt.y = GET_Y_LPARAM(position);
-            ScreenToClient(s_tree, &hit.pt);
+    if (notification->code == NM_CUSTOMDRAW) {
+        NMTVCUSTOMDRAW* draw = (NMTVCUSTOMDRAW*)notification;
+        if (draw->nmcd.dwDrawStage == CDDS_PREPAINT) { return CDRF_NOTIFYITEMDRAW; }
+        if (draw->nmcd.dwDrawStage == CDDS_ITEMPREPAINT) {
+            _Sidebar_DrawRow(draw);
+            return CDRF_SKIPDEFAULT;
         }
-        HTREEITEM const item = TreeView_HitTest(s_tree, &hit);
-        WCHAR name[MAX_PATH_EXPLICIT];
-        LPARAM kind;
-        if (item && (hit.flags & (TVHT_ONITEMLABEL | TVHT_ONITEMICON)) &&
-            _Sidebar_GetItem(item, name, &kind) && kind == SIDEBAR_FILE) {
-            HPATHL path = _Sidebar_ItemPath(item);
-            _Sidebar_OpenFile(path);
-            Path_Release(path);
-            s_syncAfterClick = true;
-        }
+    } else if (notification->code == TVN_DELETEITEMW) {
+        HTREEITEM const item = ((NMTREEVIEWW const*)notification)->itemOld.hItem;
+        if (s_currentItem == item) { s_currentItem = NULL; }
+        if (s_hotItem == item) { s_hotItem = NULL; }
+        if (s_pressedItem == item) { s_pressedItem = NULL; }
     } else if (notification->code == TVN_ITEMEXPANDINGW) {
         NMTREEVIEWW const* event = (NMTREEVIEWW const*)notification;
-        if ((event->action & TVE_EXPAND) && event->itemNew.lParam == SIDEBAR_UNLOADED) {
+        if ((event->action & TVE_EXPAND) && (event->itemNew.lParam & SIDEBAR_KIND_MASK) == SIDEBAR_UNLOADED) {
             return _Sidebar_LoadChildren(event->itemNew.hItem) ? FALSE : TRUE;
         }
     } else if (notification->code == TVN_ITEMEXPANDEDW) {
         NMTREEVIEWW const* event = (NMTREEVIEWW const*)notification;
+        if (event->itemNew.hItem == s_folders) { Settings.SidebarFoldersCollapsed = !(event->action & TVE_EXPAND); }
         if (event->action == TVE_COLLAPSE) {
             _Sidebar_CollapseDirectory(event->itemNew.hItem);
         }
@@ -1026,8 +1274,8 @@ bool Sidebar_Create(HWND parent)
     }
     // Create the original tree first so existing SysTreeView321 lookups remain valid.
     s_tree = CreateWindowEx(0, WC_TREEVIEW, NULL,
-                           WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TVS_HASBUTTONS | TVS_HASLINES |
-                           TVS_LINESATROOT | TVS_SHOWSELALWAYS | TVS_DISABLEDRAGDROP,
+                           WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TVS_FULLROWSELECT | TVS_TRACKSELECT |
+                           TVS_NONEVENHEIGHT | TVS_NOHSCROLL | TVS_SHOWSELALWAYS | TVS_DISABLEDRAGDROP,
                            0, 0, 0, 0, s_panel, (HMENU)IDC_SIDEBAR_TREE, Globals.hInstance, NULL);
     s_filter = CreateWindowEx(0, WC_EDIT, NULL, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
                              0, 0, 0, 0, s_panel, (HMENU)1, Globals.hInstance, NULL);
@@ -1089,20 +1337,8 @@ bool Sidebar_PreTranslateMessage(MSG* message)
         switch (message->wParam) {
         case VK_RETURN: {
             HTREEITEM const item = TreeView_GetSelection(s_tree);
-            WCHAR name[MAX_PATH_EXPLICIT];
-            LPARAM kind;
-            if (item && _Sidebar_GetItem(item, name, &kind)) {
-                if (kind == SIDEBAR_FILE) {
-                    HPATHL path = _Sidebar_ItemPath(item);
-                    _Sidebar_OpenFile(path);
-                    Path_Release(path);
-                } else if (TreeView_GetItemState(s_tree, item, TVIS_EXPANDED) & TVIS_EXPANDED) {
-                    _Sidebar_CollapseDirectory(item);
-                } else if (kind != SIDEBAR_UNLOADED || _Sidebar_LoadChildren(item)) {
-                    // Ensure loading even when TreeView omits repeat notifications.
-                    TreeView_Expand(s_tree, item, TVE_EXPAND);
-                }
-            }
+            POINT const keyboard = { -1, -1 };
+            if (item) { _Sidebar_ActivateRow(item, keyboard); }
             return true;
         }
         case VK_F5:
@@ -1169,19 +1405,15 @@ void Sidebar_OnThemeChanged(void)
         SidebarDrawing* previous = s_drawing;
         s_drawing = replacement;
         SendMessage(s_filter, WM_SETFONT, (WPARAM)SidebarDrawing_EditFont(s_drawing), TRUE);
+        SendMessage(s_tree, WM_SETFONT, (WPARAM)SidebarDrawing_EditFont(s_drawing), FALSE);
         SidebarDrawing_Destroy(previous);
     }
     // Match the style dialog: let the existing subclass update colors and redraw.
     SendMessage(s_tree, WM_THEMECHANGED, 0, 0);
     TreeView_SetBkColor(s_tree, s_palette->island);
     TreeView_SetTextColor(s_tree, s_palette->text);
-    s_iconCount = 0;
-    SHFILEINFOW info = { 0 };
-    // A synthetic directory name yields the folder icon; a drive root yields a drive icon.
-    HIMAGELIST const images = (HIMAGELIST)SHGetFileInfoW(L"folder", FILE_ATTRIBUTE_DIRECTORY, &info, sizeof(info),
-                                                     SHGFI_USEFILEATTRIBUTES | SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
-    TreeView_SetImageList(s_tree, images, TVSIL_NORMAL);
-    s_folderIcon = info.iIcon;
+    TreeView_SetItemHeight(s_tree, _Sidebar_Pixels(12));
+    TreeView_SetIndent(s_tree, 0);
 #ifdef D_NP3_WIN10_DARK_MODE
     AllowDarkModeForWindowEx(s_tree, UseDarkMode());
     AllowDarkModeForWindowEx(s_splitter, UseDarkMode());
