@@ -23,9 +23,10 @@ HFONT SidebarDrawing_EditFont(const SidebarDrawing* drawing);
 // clips to bounds and uses a trailing ellipsis on overflow. Dimensions are pixels.
 int  SidebarDrawing_Measure(HDC dc, const SidebarDrawing* drawing, LPCWSTR text, SidebarFont font);
 void SidebarDrawing_Text(HDC dc, const SidebarDrawing* drawing, LPCWSTR text, SidebarFont font, RECT bounds, COLORREF color);
-// Draw an antialiased rounded rectangle; CLR_INVALID omits its fill or 1px stroke.
-// Empty bounds are ignored. Radius and coordinates are physical pixels.
-void SidebarDrawing_RoundRect(HDC dc, RECT bounds, int radius, COLORREF fill, COLORREF stroke);
+// Draw an antialiased rounded rectangle; CLR_INVALID omits its fill or stroke.
+// Empty bounds are ignored. Radius, positive strokeWidth and coordinates are
+// physical pixels; inset the path by half the stroke to keep it inside bounds.
+void SidebarDrawing_RoundRect(HDC dc, RECT bounds, int radius, int strokeWidth, COLORREF fill, COLORREF stroke);
 // Draw a plus or refresh icon (refresh=true) within a circular button's bounds.
 void SidebarDrawing_Icon(HDC dc, RECT bounds, bool refresh, COLORREF color, UINT dpi);
 

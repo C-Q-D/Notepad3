@@ -9,6 +9,9 @@ enum { SIDEBAR_MIN_WIDTH = 100, SIDEBAR_MAX_WIDTH = 4000 };
 enum { SIDEBAR_SORT_NAME = 0, SIDEBAR_SORT_EXTENSION = 1, SIDEBAR_SORT_MODIFIED = 2 };
 enum { SIDEBAR_MAX_RECENT_HIDDEN = 32 };
 
+// Scale the shared 1-logical-pixel panel/editor stroke to dpi, at least one pixel.
+int Sidebar_GetStrokeWidth(UINT dpi);
+
 // Create the panel, its tree/EDIT and the sibling drag gap for parent. Root
 // restoration follows startup FileLoad. Return false on resource/control failure.
 bool Sidebar_Create(HWND parent);

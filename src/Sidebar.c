@@ -41,6 +41,11 @@ static SidebarPalette const s_lightPalette = {
 };
 static SidebarPalette const* s_palette = &s_lightPalette;
 
+int Sidebar_GetStrokeWidth(UINT dpi)
+{
+    return max_i(1, MulDiv(1, dpi, 96));
+}
+
 // Main-window gaps must share the same background as the panel's outer corners.
 static COLORREF _Sidebar_Background(void)
 {
@@ -228,7 +233,7 @@ static LRESULT CALLBACK _Sidebar_SplitterProc(HWND hwnd, UINT message, WPARAM wP
             GetClientRect(parent, &client);
             UINT const dpi = Scintilla_GetWindowDPI(parent);
             // Persist the island width, excluding its left margin and the drag gap.
-            int const overhead = MulDiv(UseDarkMode() ? 24 : 16, dpi, 96) + (UseDarkMode() ? 2 : 0);
+            int const overhead = MulDiv(UseDarkMode() ? 24 : 16, dpi, 96) + (UseDarkMode() ? 2 * Sidebar_GetStrokeWidth(dpi) : 0);
             int const pixels = _Sidebar_ClampWidth(MulDiv(point.x - MulDiv(8, dpi, 96), 96, dpi), client.right - overhead, dpi);
             Settings.SidebarWidth = MulDiv(pixels, 96, dpi);
             UpdateUI(parent);
@@ -824,11 +829,14 @@ static void _Sidebar_Paint(HDC dc)
     FillRect(dc, &client, GetStockObject(DC_BRUSH));
     if (!s_drawing || IsRectEmpty(&client)) { return; }
     SidebarPalette const* p = s_palette;
-    SidebarDrawing_RoundRect(dc, client, _Sidebar_Pixels(16), p->island, CLR_INVALID);
+    int const strokeWidth = Sidebar_GetStrokeWidth(s_dpi);
+    SidebarDrawing_RoundRect(dc, client, _Sidebar_Pixels(16), strokeWidth, p->island, CLR_INVALID);
     int const statusTop = max_i(0, client.bottom - _Sidebar_Pixels(30));
     int const saved = SaveDC(dc);
-    // The interior clip leaves the 1px border to the antialiased final stroke.
-    HRGN const interior = CreateRoundRectRgn(1, 1, client.right, client.bottom, _Sidebar_Pixels(32), _Sidebar_Pixels(32));
+    // Inset the footer clip by the scaled stroke on every edge.
+    int const innerDiameter = max_i(1, _Sidebar_Pixels(32) - 2 * strokeWidth);
+    HRGN const interior = CreateRoundRectRgn(strokeWidth, strokeWidth, client.right - strokeWidth,
+                                           client.bottom - strokeWidth, innerDiameter, innerDiameter);
     if (interior) {
         ExtSelectClipRgn(dc, interior, RGN_AND);
         DeleteObject(interior);
@@ -836,20 +844,20 @@ static void _Sidebar_Paint(HDC dc)
     RECT footer = { 0, statusTop, client.right, client.bottom };
     SetDCBrushColor(dc, p->status);
     FillRect(dc, &footer, GetStockObject(DC_BRUSH));
-    RECT line = { 0, statusTop, client.right, statusTop + 1 };
+    RECT line = { 0, statusTop, client.right, statusTop + strokeWidth };
     SetDCBrushColor(dc, p->divider);
     FillRect(dc, &line, GetStockObject(DC_BRUSH));
     WCHAR label[128], sort[32];
     GetLngString(IDS_MUI_SIDEBAR_LABEL, label, COUNTOF(label));
     GetLngString(IDS_MUI_SIDEBAR_SORT_NAME, sort, COUNTOF(sort));
     int const badgeWidth = SidebarDrawing_Measure(dc, s_drawing, label, SidebarFontBold) + _Sidebar_Pixels(26);
-    RECT badge = { 0, statusTop + 1, min_i(badgeWidth, client.right), client.bottom };
+    RECT badge = { 0, statusTop + strokeWidth, min_i(badgeWidth, client.right), client.bottom };
     SetDCBrushColor(dc, RGB(126,231,135));
     FillRect(dc, &badge, GetStockObject(DC_BRUSH));
     badge.left += _Sidebar_Pixels(16);
     SidebarDrawing_Text(dc, s_drawing, label, SidebarFontBold, badge, RGB(11,12,11));
-    if (s_hover == 4) { SidebarDrawing_RoundRect(dc, s_hiddenRect, _Sidebar_Pixels(4), p->textHot, CLR_INVALID); }
-    if (s_hover == 5) { SidebarDrawing_RoundRect(dc, s_sortRect, _Sidebar_Pixels(4), p->textHot, CLR_INVALID); }
+    if (s_hover == 4) { SidebarDrawing_RoundRect(dc, s_hiddenRect, _Sidebar_Pixels(4), strokeWidth, p->textHot, CLR_INVALID); }
+    if (s_hover == 5) { SidebarDrawing_RoundRect(dc, s_sortRect, _Sidebar_Pixels(4), strokeWidth, p->textHot, CLR_INVALID); }
     SidebarDrawing_Text(dc, s_drawing, L".*", SidebarFontSmall, s_hiddenRect, p->secondary);
     SidebarDrawing_Text(dc, s_drawing, sort, SidebarFontSmall, s_sortRect, p->secondary);
     // Empty path handles can own a NULL buffer during startup, before FileLoad.
@@ -860,7 +868,7 @@ static void _Sidebar_Paint(HDC dc)
     SidebarDrawing_Text(dc, s_drawing, current, SidebarFontSmall, pathRect, p->secondary);
     RestoreDC(dc, saved);
 
-    SidebarDrawing_RoundRect(dc, client, _Sidebar_Pixels(16), CLR_INVALID, p->border);
+    SidebarDrawing_RoundRect(dc, client, _Sidebar_Pixels(16), strokeWidth, CLR_INVALID, p->border);
 
     HPATHL parent = Path_Copy(Settings.SidebarFolder);
     LPCWSTR name = Path_FindFileName(parent);
@@ -884,12 +892,12 @@ static void _Sidebar_Paint(HDC dc)
     RECT subTitle = { _Sidebar_Pixels(35), _Sidebar_Pixels(42), title.right, _Sidebar_Pixels(58) };
     SidebarDrawing_Text(dc, s_drawing, parentText, SidebarFontSmall, subTitle, p->secondary);
     Path_Release(parent);
-    SidebarDrawing_RoundRect(dc, s_newRect, _Sidebar_Pixels(15), s_hover == 1 ? p->buttonHot : p->button, CLR_INVALID);
-    SidebarDrawing_RoundRect(dc, s_refreshRect, _Sidebar_Pixels(15), s_hover == 2 ? p->buttonHot : p->button, CLR_INVALID);
+    SidebarDrawing_RoundRect(dc, s_newRect, _Sidebar_Pixels(15), strokeWidth, s_hover == 1 ? p->buttonHot : p->button, CLR_INVALID);
+    SidebarDrawing_RoundRect(dc, s_refreshRect, _Sidebar_Pixels(15), strokeWidth, s_hover == 2 ? p->buttonHot : p->button, CLR_INVALID);
     SidebarDrawing_Icon(dc, s_newRect, false, p->secondary, s_dpi);
     SidebarDrawing_Icon(dc, s_refreshRect, true, p->secondary, s_dpi);
     bool const focused = GetFocus() == s_filter;
-    SidebarDrawing_RoundRect(dc, s_filterRect, _Sidebar_Pixels(17), focused ? p->filterFocus : p->filter,
+    SidebarDrawing_RoundRect(dc, s_filterRect, _Sidebar_Pixels(17), strokeWidth, focused ? p->filterFocus : p->filter,
                             focused ? p->filterFocusBorder : (s_hover == 3 ? p->filterHotBorder : CLR_INVALID));
     RECT slash = s_filterRect;
     slash.left += _Sidebar_Pixels(14);
@@ -1142,7 +1150,7 @@ void Sidebar_Layout(RECT* available)
     int const left = available->left + (UseDarkMode() ? 0 : MulDiv(8, dpi, 96));
     int const top = available->top + (UseDarkMode() ? 0 : MulDiv(2, dpi, 96));
     int const bottom = available->bottom - (UseDarkMode() ? 0 : MulDiv(8, dpi, 96));
-    int const width = _Sidebar_ClampWidth(Settings.SidebarWidth, available->right - left - split - (UseDarkMode() ? 2 : 0), dpi);
+    int const width = _Sidebar_ClampWidth(Settings.SidebarWidth, available->right - left - split - (UseDarkMode() ? 2 * Sidebar_GetStrokeWidth(dpi) : 0), dpi);
     int const height = max_i(0, bottom - top);
     SetWindowPos(s_panel, NULL, left, top, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
     SetWindowPos(s_splitter, NULL, left + width, top, split, height, SWP_NOZORDER | SWP_NOACTIVATE);

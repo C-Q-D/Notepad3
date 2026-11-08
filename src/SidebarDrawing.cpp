@@ -182,17 +182,18 @@ static Gdiplus::Color Color(COLORREF color)
     return Gdiplus::Color(255, GetRValue(color), GetGValue(color), GetBValue(color));
 }
 
-void SidebarDrawing_RoundRect(HDC dc, RECT bounds, int radius, COLORREF fill, COLORREF stroke)
+void SidebarDrawing_RoundRect(HDC dc, RECT bounds, int radius, int strokeWidth, COLORREF fill, COLORREF stroke)
 {
     if (bounds.right <= bounds.left || bounds.bottom <= bounds.top) {
         return;
     }
     Gdiplus::Graphics graphics(dc);
     graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    Gdiplus::REAL const x = (Gdiplus::REAL)bounds.left + 0.5f;
-    Gdiplus::REAL const y = (Gdiplus::REAL)bounds.top + 0.5f;
-    Gdiplus::REAL const width = (Gdiplus::REAL)(bounds.right - bounds.left - 1);
-    Gdiplus::REAL const height = (Gdiplus::REAL)(bounds.bottom - bounds.top - 1);
+    Gdiplus::REAL const halfStroke = (Gdiplus::REAL)strokeWidth / 2.0f;
+    Gdiplus::REAL const x = (Gdiplus::REAL)bounds.left + halfStroke;
+    Gdiplus::REAL const y = (Gdiplus::REAL)bounds.top + halfStroke;
+    Gdiplus::REAL const width = (Gdiplus::REAL)(bounds.right - bounds.left - strokeWidth);
+    Gdiplus::REAL const height = (Gdiplus::REAL)(bounds.bottom - bounds.top - strokeWidth);
     Gdiplus::REAL       diameter = (Gdiplus::REAL)(radius * 2);
     if (diameter > width) {
         diameter = width;
@@ -214,7 +215,7 @@ void SidebarDrawing_RoundRect(HDC dc, RECT bounds, int radius, COLORREF fill, CO
         graphics.FillPath(&brush, &path);
     }
     if (stroke != CLR_INVALID) {
-        Gdiplus::Pen pen(Color(stroke), 1.0f);
+        Gdiplus::Pen pen(Color(stroke), (Gdiplus::REAL)strokeWidth);
         graphics.DrawPath(&pen, &path);
     }
 }

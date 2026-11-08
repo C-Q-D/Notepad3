@@ -3168,7 +3168,7 @@ static void _InitEditWndFrame()
     SetWindowLongPtr(s_hwndEditFrame, GWL_EXSTYLE, frameStyle & ~WS_EX_CLIENTEDGE);
     SetWindowPos(s_hwndEditFrame, NULL, 0, 0, 0, 0, SWP_NOZORDER | SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED);
     if (UseDarkMode()) {
-        s_cxEditFrame = s_cyEditFrame = 1;
+        s_cxEditFrame = s_cyEditFrame = Sidebar_GetStrokeWidth(Scintilla_GetWindowDPI(s_hwndEditFrame));
     }
 
     if (s_bIsAppThemed) {
