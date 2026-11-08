@@ -115,7 +115,8 @@ static bool _Sidebar_GetItem(HTREEITEM item, LPWSTR name, LPARAM* kind)
 }
 
 // Return an owned path for an item under the directory group, including that
-// group's root path. NULL and other top-level groups yield an empty handle.
+// group's root path. NULL, presentation-only rows and other groups yield an
+// empty handle; their display text must never become a filesystem component.
 static HPATHL _Sidebar_ItemPath(HTREEITEM item)
 {
     HPATHL result = Path_Allocate(NULL);
@@ -127,7 +128,8 @@ static HPATHL _Sidebar_ItemPath(HTREEITEM item)
     while (item && item != root) {
         WCHAR name[MAX_PATH_EXPLICIT];
         LPARAM kind;
-        if (!_Sidebar_GetItem(item, name, &kind)) {
+        if (!_Sidebar_GetItem(item, name, &kind) ||
+            (kind != SIDEBAR_FILE && kind != SIDEBAR_UNLOADED && kind != SIDEBAR_LOADED)) {
             StrgDestroy(relative);
             return result;
         }
@@ -605,7 +607,8 @@ static HTREEITEM _Sidebar_FindPath(const HPATHL path, bool refreshMissing)
         StringCchCopyN(component, COUNTOF(component), part, size);
         WCHAR name[MAX_PATH_EXPLICIT];
         LPARAM kind;
-        if (!_Sidebar_GetItem(parent, name, &kind) || kind == SIDEBAR_FILE) {
+        if (!_Sidebar_GetItem(parent, name, &kind) ||
+            (kind != SIDEBAR_UNLOADED && kind != SIDEBAR_LOADED)) {
             return NULL;
         }
         if (kind == SIDEBAR_UNLOADED && !_Sidebar_LoadChildren(parent)) {
@@ -615,7 +618,11 @@ static HTREEITEM _Sidebar_FindPath(const HPATHL path, bool refreshMissing)
         HTREEITEM match = NULL;
         for (int attempt = 0; attempt < (refreshMissing ? 2 : 1); ++attempt) {
             for (HTREEITEM child = TreeView_GetChild(s_tree, parent); child; child = TreeView_GetNextSibling(s_tree, child)) {
-                if (_Sidebar_GetItem(child, name, &kind) && CompareStringOrdinal(component, -1, name, -1, TRUE) == CSTR_EQUAL) {
+                // A localized hint can have the same text as a newly created
+                // file. Ignore non-path rows so refreshMissing re-enumerates it.
+                if (_Sidebar_GetItem(child, name, &kind) &&
+                    (kind == SIDEBAR_FILE || kind == SIDEBAR_UNLOADED || kind == SIDEBAR_LOADED) &&
+                    CompareStringOrdinal(component, -1, name, -1, TRUE) == CSTR_EQUAL) {
                     match = child;
                     break;
                 }

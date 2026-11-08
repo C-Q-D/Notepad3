@@ -323,6 +323,30 @@ RunGroupsScenario() {
     TreeKey(tree, 0x74)
     WaitUntil(() => TreeFind(tree, 'groups-refresh.txt') != 0 && !(SendMessage(0x1127, TreeFind(tree, 'sub'), 0x20, tree) & 0x20)
         && SendMessage(0x110A, 4, TreeFind(tree, 'sub'), tree) = 0, 'Groups F5 keeps current-file parent collapsed')
+    ; The visible empty hint must not shadow a real file created with that name.
+    ; Open through the normal dialog, then switch away and reopen from the tree.
+    empty := TreeFind(tree, 'empty')
+    hintName := TreeText(tree, SendMessage(0x110A, 4, empty, tree))
+    if hintName != '(empty)'
+        throw Error('Groups empty-directory collision setup did not find the English hint')
+    FileAppend('real file named like the empty hint', testDir '\fixture\empty\' hintName, 'UTF-8')
+    ; Only this isolated INI accepts the unrelated unknown-extension warning.
+    IniWrite(6, testDir '\Notepad3.ini', 'Suppressed Messages', 'MsgFileUnknownExt')
+    PostMessage(0x111, 40001, 0, , main)
+    dialog := WinWait('ahk_class #32770 ahk_pid ' testPid, , 5)
+    if !dialog
+        throw Error('Groups collision file-open dialog did not appear')
+    ControlSetText('"' testDir '\fixture\empty\' hintName '"', 'Edit1', dialog)
+    PostMessage(0x111, 1, 0, , dialog)
+    if !WinWaitClose(dialog, , 5) || !WinWait(hintName ' ahk_pid ' testPid, , 5)
+        throw Error('Groups collision file-open setup did not load the real file')
+    ClickTree(tree, TreeFind(tree, 'a.txt'))
+    if !WinWait('a.txt ahk_pid ' testPid, , 5)
+        throw Error('Groups collision setup did not switch away from the real file')
+    ClickTree(tree, TreeFind(tree, hintName, empty))
+    editor := ControlGetHwnd('Scintilla1', main)
+    WaitUntil(() => EditorText(editor) = 'real file named like the empty hint'
+        && TreeText(tree, SendMessage(0x110A, 9, 0, tree)) = hintName, 'Groups newly created file matching empty hint reopens from tree')
     FinishSidebarScenario('Groups final')
 }
 
