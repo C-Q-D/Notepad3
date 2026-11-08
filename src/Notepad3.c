@@ -2662,7 +2662,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT umsg, WPARAM wParam, LPARAM lParam)
         return MsgNotify(hwnd, wParam, lParam);
 
     case WM_SIDEBAR_RESTORE:
-        if (Settings.ShowSidebar && Path_IsExistingDirectory(Settings.SidebarFolder)) {
+        if (Settings.ShowSidebar) {
             Sidebar_SetRoot(Settings.SidebarFolder);
             Sidebar_SyncToFile(Paths.CurrentFile, false);
         }

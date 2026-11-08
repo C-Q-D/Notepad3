@@ -27,7 +27,8 @@ void Sidebar_Layout(RECT* available);
 // theme/DPI changes. Safe before creation; never installs another tree subclass.
 void Sidebar_OnThemeChanged(void);
 // Replace the groups with folder (non-null path handle) as the directory group's
-// path anchor. Missing folders retain the recent group without a dialog. On success
+// path anchor. Unset/missing roots retain recent files and show recovery rows.
+// Missing paths remain configured for Retry. On success
 // persist the canonical long-name root and restore both group collapse settings.
 // An active filter is cancelled and searched again against the replacement root.
 void Sidebar_SetRoot(const HPATHL folder);

@@ -254,6 +254,8 @@ try {
         RunCreateScenario()
     if Ord(through) >= Ord('F') && (scenario = 'All' || scenario = 'Filter')
         RunFilterScenario()
+    if Ord(through) >= Ord('F') && (scenario = 'All' || scenario = 'Edges')
+        RunEdgesScenario()
 } catch Error as err {
     FileAppend('FAIL: ' err.Message '`n', logFile)
     exitCode := 1
@@ -525,6 +527,211 @@ ToggleExpanded(tree) {
     return item && (SendMessage(0x1127, item, 0x20, tree) & 0x20) && TreeFind(tree, 'inner.txt', item)
 }
 
+; Exercise root recovery through real rows; fixtures and INI remain isolated.
+RunEdgesScenario() {
+    global testDir, main, testPid, themeName, edgesFailures
+    edgesFailures := 0
+    tree := StartSidebarScenario('', 1, testDir '\fixture\a.txt')
+    DllCall('SetWindowPos', 'ptr', main, 'ptr', 0, 'int', 80, 'int', 80, 'int', 1100, 'int', 750, 'uint', 0x14)
+    panel := DllCall('GetParent', 'ptr', tree, 'ptr')
+    filter := ControlGetHwnd('Edit1', panel)
+    EdgesAssert(FolderGroup(tree) != 0 && TreeFind(tree, '[Open folder…]') != 0, 'unset root offers open-folder row')
+    EdgesAssert(ControlGetText(panel) = 'No folder open' && !DllCall('IsWindowEnabled', 'ptr', filter), 'unset root has persistent status and disabled filter')
+    ClickTree(tree, FolderGroup(tree), false, true)
+    collapsed := !(SendMessage(0x1127, FolderGroup(tree), 0x20, tree) & 0x20)
+    ClickTree(tree, FolderGroup(tree), false, true)
+    EdgesAssert(collapsed && (SendMessage(0x1127, FolderGroup(tree), 0x20, tree) & 0x20) && TreeFind(tree, '[Open folder…]') != 0, 'boundary group collapse and expand retains recovery action')
+    ClickSidebarAction(tree, 'New')
+    EdgesNoDialog('unset root disables New')
+    if item := TreeFind(tree, '[Open folder…]') {
+        ClickTree(tree, item)
+        EdgesCancelPicker('open-folder row invokes folder picker')
+    } else
+        EdgesAssert(false, 'open-folder row invokes folder picker')
+    recent := SendMessage(0x110A, 0, 0, tree)
+    EdgesAssert(TreeText(tree, recent) = '# Recent' && recent != FolderGroup(tree), 'recent group remains without root')
+    EdgesShot('unset')
+    FinishSidebarScenario('Edges unset')
+
+    missing := testDir '\edges-missing'
+    tree := StartSidebarScenario(missing, 1, testDir '\fixture\a.txt')
+    DllCall('SetWindowPos', 'ptr', main, 'ptr', 0, 'int', 80, 'int', 80, 'int', 1100, 'int', 750, 'uint', 0x14)
+    panel := DllCall('GetParent', 'ptr', tree, 'ptr')
+    filter := ControlGetHwnd('Edit1', panel)
+    EdgesAssert(TreeFind(tree, 'Folder does not exist') != 0 && TreeFind(tree, '[Retry]  [Choose again…]') != 0, 'startup missing root shows recovery rows')
+    EdgesAssert(ControlGetText(panel) = 'Folder does not exist: ' missing && !DllCall('IsWindowEnabled', 'ptr', filter), 'missing root has persistent path status and disabled filter')
+    ClickSidebarAction(tree, 'New')
+    EdgesNoDialog('missing root disables New')
+    if item := TreeFind(tree, '[Retry]  [Choose again…]') {
+        ClickTree(tree, item, true)
+        EdgesCancelPicker('choose-again action invokes folder picker')
+    } else
+        EdgesAssert(false, 'choose-again action invokes folder picker')
+    EdgesShot('missing')
+    FinishSidebarScenario('Edges missing')
+    EdgesAssert(ReadSetting(testDir '\Notepad3.ini', 'SidebarFolder', '') != '' && StrLower(PersistedSidebarFolder()) = StrLower(missing), 'missing root path survives normal close')
+    tree := ResumeRecentScenario(testDir '\fixture\a.txt')
+    DirCreate(missing)
+    FileAppend('restored', missing '\restored.txt', 'UTF-8')
+    if item := TreeFind(tree, '[Retry]  [Choose again…]')
+        ClickTree(tree, item)
+    EdgesWait(() => TreeFind(tree, 'restored.txt') != 0 && DllCall('IsWindowEnabled', 'ptr', ControlGetHwnd('Edit1', DllCall('GetParent', 'ptr', tree, 'ptr'))), 'retry restores tree and enables filter')
+    PostMessage(0x111, 41066, 0, , main)
+    WaitUntil(() => !DllCall('IsWindowVisible', 'ptr', tree), 'Edges fixture hides sidebar')
+    FileDelete(missing '\restored.txt')
+    DirDelete(missing)
+    PostMessage(0x111, 41066, 0, , main)
+    EdgesWait(() => DllCall('IsWindowVisible', 'ptr', tree) && TreeFind(tree, 'Folder does not exist') != 0, 'showing sidebar detects removed root')
+    FinishSidebarScenario('Edges missing after show')
+
+    folder := testDir '\edges-root'
+    DirCreate(folder '\empty')
+    DirCreate(folder '\sub')
+    FileAppend('keep document', folder '\keep.txt', 'UTF-8')
+    FileAppend('inside document', folder '\sub\inside.txt', 'UTF-8')
+    FileAppend('binary fixture', folder '\binary.bin', 'UTF-8')
+    WriteRecentReworkIni(folder '\sub\inside.txt', 0, folder '\binary.bin')
+    IniWrite(folder, testDir '\Notepad3.ini', 'Settings', 'SidebarFolder')
+    tree := ResumeRecentScenario(folder '\keep.txt')
+    empty := TreeFind(tree, 'empty')
+    SendMessage(0x1102, 2, empty, tree)
+    hint := SendMessage(0x110A, 4, empty, tree)
+    if TreeText(tree, hint) != '(empty)'
+        throw Error('Edges empty-folder New setup did not find hint')
+    SendMessage(0x110B, 9, hint, tree)
+    dialog := OpenCreateDialog(tree)
+    ControlSetText('from-empty.txt', ControlGetHwnd('Edit1', dialog))
+    CreateDialogKey(dialog, 0x0D)
+    if !WinWaitClose(dialog, , 3)
+        throw Error('Edges empty-folder New did not close dialog')
+    EdgesWait(() => FileExist(folder '\empty\from-empty.txt') && InStr(WinGetTitle(main), 'from-empty.txt'), 'New from empty hint targets its directory')
+    recent := SendMessage(0x110A, 0, 0, tree)
+    item := TreeFind(tree, folder '\sub\inside.txt', recent)
+    if !item
+        throw Error('Edges recent-file New setup did not find inside.txt')
+    SendMessage(0x110B, 9, item, tree)
+    dialog := OpenCreateDialog(tree)
+    ControlSetText('from-recent.txt', ControlGetHwnd('Edit1', dialog))
+    CreateDialogKey(dialog, 0x0D)
+    if !WinWaitClose(dialog, , 3)
+        throw Error('Edges recent-file New did not close dialog')
+    EdgesWait(() => FileExist(folder '\sub\from-recent.txt') && InStr(WinGetTitle(main), 'from-recent.txt'), 'New from recent file targets its directory')
+    FinishSidebarScenario('Edges New destinations')
+
+    WriteRecentReworkIni(folder '\binary.bin', 0, folder '\sub\inside.txt')
+    IniWrite(folder, testDir '\Notepad3.ini', 'Settings', 'SidebarFolder')
+    IniWrite(6, testDir '\Notepad3.ini', 'Suppressed Messages', 'MsgFileUnknownExt')
+    tree := ResumeRecentScenario(folder '\keep.txt')
+    panel := DllCall('GetParent', 'ptr', tree, 'ptr')
+    editor := ControlGetHwnd('Scintilla1', main)
+    item := TreeFind(tree, folder '\binary.bin', SendMessage(0x110A, 0, 0, tree))
+    if !item
+        throw Error('Edges binary recent setup did not find binary.bin')
+    ClickTree(tree, item)
+    EdgesWait(() => EditorText(editor) = 'keep document' && ControlGetText(panel) = 'Binary file; cannot open in the editor', 'recent binary click preserves document and reports hint')
+    ClickTree(tree, TreeFind(tree, 'keep.txt'), false, true)
+    item := TreeFind(tree, folder '\binary.bin', SendMessage(0x110A, 0, 0, tree))
+    SendMessage(0x110B, 9, item, tree)
+    ControlFocus(tree)
+    TreeKey(tree, 0x0D)
+    EdgesWait(() => EditorText(editor) = 'keep document' && ControlGetText(panel) = 'Binary file; cannot open in the editor', 'recent binary Enter preserves document and reports hint')
+    ClickTree(tree, TreeFind(tree, 'keep.txt'), false, true)
+    EdgesShot('normal')
+    DragWidth(panel, 219)
+    ControlGetPos(, , &width, , panel)
+    EdgesAssert(width = 219, 'middle width retains requested 219 logical pixels')
+    DragWidth(panel, 159)
+    ClickSidebarAction(tree, 'New')
+    EdgesNoDialog('narrow hidden New is not clickable')
+    FileAppend('refresh marker', folder '\refresh-probe.txt', 'UTF-8')
+    ClickSidebarAction(tree, 'Refresh')
+    Sleep(100)
+    EdgesAssert(TreeFind(tree, 'refresh-probe.txt') = 0, 'narrow hidden Refresh is not clickable')
+    ClickFooter(panel, false)
+    ClickFooter(panel, true)
+    DragWidth(panel, 50)
+    ControlGetPos(, , &width, &height, panel)
+    filter := ControlGetHwnd('Edit1', panel)
+    ControlGetPos(, , &editWidth, &editHeight, filter)
+    EdgesAssert(width = 100 && height > 0 && editWidth >= 0 && editHeight > 0 && DllCall('IsWindowVisible', 'ptr', tree), 'minimum width stays usable with nonnegative child sizes')
+    EdgesShot('minimum')
+    DragWidth(panel, 160)
+    ClickSidebarAction(tree, 'New')
+    dialog := WinWait('New file ahk_class #32770 ahk_pid ' testPid, , 2)
+    EdgesAssert(dialog != 0, '160 logical pixels restores header action')
+    if dialog {
+        PostMessage(0x111, 2, 0, , dialog)
+        WinWaitClose(dialog, , 3)
+    }
+    ClickSidebarAction(tree, 'Refresh')
+    EdgesWait(() => TreeFind(tree, 'refresh-probe.txt') != 0, '160 logical pixels restores refresh')
+    DragWidth(panel, 300)
+    EdgesDpiMessage(tree)
+    EdgesAssert(SendMessage(0x111C, 0, 0, tree) = 12 && TreeFind(tree, 'keep.txt') != 0, 'DPI update rebuilds row metrics and retains tree')
+    FinishSidebarScenario('Edges widths')
+    EdgesAssert(ReadSetting(testDir '\Notepad3.ini', 'SidebarShowHidden', 'true') = 'true' && ReadSetting(testDir '\Notepad3.ini', 'SidebarSortMode', '0') = '0', 'narrow hidden footer actions do not change settings')
+    if edgesFailures
+        throw Error('Edges contract failures: ' edgesFailures)
+}
+
+; Record independent boundary failures and continue, matching the Filter runner.
+EdgesAssert(pass, name) {
+    global edgesFailures, logFile
+    FileAppend((pass ? 'PASS: Edges ' : 'FAIL: Edges ') name '`n', logFile)
+    if !pass
+        edgesFailures += 1
+}
+
+; Poll a real UI/file observation; retain failure so other boundaries still run.
+EdgesWait(condition, name, timeoutMs := 2000) {
+    start := A_TickCount
+    while !condition.Call() && A_TickCount - start < timeoutMs
+        Sleep(25)
+    EdgesAssert(condition.Call(), name)
+}
+
+; A disabled or hidden header action must not create a modal dialog. Close only
+; an unexpected dialog in this recorded test process after retaining the failure.
+EdgesNoDialog(name) {
+    global testPid
+    dialog := WinWait('ahk_class #32770 ahk_pid ' testPid, , 0.25)
+    EdgesAssert(!dialog, name)
+    if dialog {
+        PostMessage(0x111, 2, 0, , dialog)
+        WinWaitClose(dialog, , 3)
+    }
+}
+
+; Cancel the picker triggered by a recovery row, without sending its command here.
+EdgesCancelPicker(name) {
+    global testPid
+    dialog := WinWait('Select folder to show in the sidebar ahk_class #32770 ahk_pid ' testPid, , 2)
+    EdgesAssert(dialog != 0, name)
+    if dialog {
+        PostMessage(0x111, 2, 0, , dialog)
+        if !WinWaitClose(dialog, , 3)
+            throw Error('Edges recovery picker did not close')
+    }
+}
+
+; Capture each requested boundary once per theme, using the existing isolated run.
+EdgesShot(state) {
+    global main, screenshotDirectory, themeName
+    if screenshotDirectory != ''
+        CaptureWindow(main, screenshotDirectory '\edges-' state '-' StrLower(themeName) '.png')
+}
+
+; Exercise the real DPI entry at this monitor's DPI. Windows marshals this
+; system message's sender-side RECT. Perturb native metrics to observe rebuilding
+; without changing system scaling or installing any production test hook.
+EdgesDpiMessage(tree) {
+    global main
+    rectangle := Buffer(16, 0)
+    DllCall('GetWindowRect', 'ptr', main, 'ptr', rectangle)
+    SendMessage(0x111B, 8, 0, tree)
+    dpi := DllCall('GetDpiForWindow', 'ptr', main, 'uint')
+    SendMessage(0x2E0, dpi | (dpi << 16), rectangle.Ptr, , main)
+}
 ; Target panel-client coordinates. Hidden is clicked only in name mode; sort's
 ; right edge stays fixed for all three localized label widths.
 ClickFooter(panel, sort) {
@@ -965,7 +1172,7 @@ RunFilterScenario() {
     before := FilterFolderState(tree)
     ControlSetText('iNNeR', filter)
     FilterWait(() => FilterFind(results, 'Inner.txt') != 0 && !DllCall('IsWindowVisible', 'ptr', tree), 'collapsed descendants match case-insensitive filename')
-    FilterAssert(TreeText(results, SendMessage(0x110A, 0, 0, results)) = '# Matched 1 files', 'result header gives exact match count')
+    FilterAssert(TreeText(results, SendMessage(0x110A, 0, 0, results)) = '# Matches: 1', 'result header gives exact match count')
     hit := FilterFind(results, 'Inner.txt')
     if hit
         ClickTree(results, hit, true)
@@ -990,7 +1197,7 @@ RunFilterScenario() {
         ClickTree(results, clear, true)
     FilterWait(() => ControlGetText(filter) = '', 'no-match clear action empties input')
     ControlSetText('folder-only', filter)
-    FilterWait(() => FilterFind(results, '[Clear filter]') != 0 && TreeText(results, SendMessage(0x110A, 0, 0, results)) = '# Matched 0 files', 'folder names are excluded from matching')
+    FilterWait(() => FilterFind(results, '[Clear filter]') != 0 && TreeText(results, SendMessage(0x110A, 0, 0, results)) = '# Matches: 0', 'folder names are excluded from matching')
 
     ControlSetText('Inner', filter)
     ControlFocus(filter)
@@ -1073,7 +1280,7 @@ RunFilterScenario() {
     FilterWait(() => EditorText(editor) = 'initial filter document', 'Enter during debounce opens new query result')
     ControlSetText('Inner', filter)
     ControlSetText('refresh-hit', filter)
-    FilterWait(() => FilterFind(results, 'refresh-hit.txt') != 0 && FilterFind(results, 'Inner.txt') = 0 && TreeText(results, SendMessage(0x110A, 0, 0, results)) = '# Matched 1 files', 'rapid text replacement discards old query results')
+    FilterWait(() => FilterFind(results, 'refresh-hit.txt') != 0 && FilterFind(results, 'Inner.txt') = 0 && TreeText(results, SendMessage(0x110A, 0, 0, results)) = '# Matches: 1', 'rapid text replacement discards old query results')
 
     replacement := testDir '\filter-replacement'
     DirCreate(replacement)
@@ -1113,7 +1320,7 @@ RunFilterScenario() {
     results := tree
     try results := ControlGetHwnd('SysTreeView322', main)
     ControlSetText('result-hit', filter)
-    FilterWait(() => SendMessage(0x1105, 0, 0, results) = 201 && TreeText(results, SendMessage(0x110A, 0, 0, results)) = '# Matched 200 files', '201 matches display exactly 200 result rows', 6000)
+    FilterWait(() => SendMessage(0x1105, 0, 0, results) = 201 && TreeText(results, SendMessage(0x110A, 0, 0, results)) = '# Matches: 200', '201 matches display exactly 200 result rows', 6000)
     if screenshotDirectory != '' && results != tree
         CaptureWindow(main, screenshotDirectory '\filter-' StrLower(themeName) '-result-limit.png')
     Loop 20001
@@ -1138,7 +1345,7 @@ RunFilterScenario() {
     TreeKey(filter, 0x1B)
     FilterWait(() => ControlGetText(filter) = '' && DllCall('IsWindowVisible', 'ptr', tree), 'Escape cancels in-progress large scan', 1200)
     ControlSetText('result-hit-00001', filter)
-    FilterWait(() => FilterFind(results, 'result-hit-00001.txt') != 0 && TreeText(results, SendMessage(0x110A, 0, 0, results)) = '# Matched 1 files', 'replacement search excludes cancelled scan completion', 15000)
+    FilterWait(() => FilterFind(results, 'result-hit-00001.txt') != 0 && TreeText(results, SendMessage(0x110A, 0, 0, results)) = '# Matches: 1', 'replacement search excludes cancelled scan completion', 15000)
 
     ControlSetText('result-hit-00002', filter)
     Sleep(350)
