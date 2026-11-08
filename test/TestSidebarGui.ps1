@@ -41,6 +41,10 @@ static bool s_restoreGroupCollapse;
 static int loads, failures;
 // Loading a directory is an observable failure, even if the final handle matches.
 static bool _Sidebar_LoadChildren(HTREEITEM item) { (void)item; ++loads; return false; }
+// The recent-files group is outside this contract; Sidebar_SyncToFile refreshes it first.
+static bool _Sidebar_IsRecentHidden(LPCWSTR path) { (void)path; return false; }
+static void _Sidebar_ChangeRecentHidden(LPCWSTR path, bool hidden) { (void)path; (void)hidden; }
+static void _Sidebar_RefreshRecent(void) {}
 '@ + "`n" + ($parts -join "`n") + @'
 
 // Create actual native rows; expected handles do not come from the path walker.
@@ -75,12 +79,12 @@ int main(void) {
     UINT const keptState = TreeView_GetItemState(s_tree, kept, TVIS_EXPANDED);
     UINT const count = TreeView_GetCount(s_tree);
     s_currentItem = start;
-    Sidebar_SyncToFile(L"C:\\fixture\\closed\\Inner.txt");
+    Sidebar_SyncToFile(L"C:\\fixture\\closed\\Inner.txt", false);
     check("unloaded result clears old Editing handle", s_currentItem == NULL);
     s_currentItem = start;
-    Sidebar_SyncToFile(L"c:\\FIXTURE\\kept\\TARGET.txt");
+    Sidebar_SyncToFile(L"c:\\FIXTURE\\kept\\TARGET.txt", false);
     check("loaded result moves Editing handle", s_currentItem == target);
-    Sidebar_SyncToFile(L"C:\\outside\\else.txt");
+    Sidebar_SyncToFile(L"C:\\outside\\else.txt", false);
     check("outside result clears Editing handle", s_currentItem == NULL);
     check("sync preserves selection, expansion and loaded nodes", loads == 0 && TreeView_GetSelection(s_tree) == start &&
         TreeView_GetItemState(s_tree, kept, TVIS_EXPANDED) == keptState &&
