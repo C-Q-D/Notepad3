@@ -1,17 +1,51 @@
-// Folder sidebar policies and native TreeView UI. File I/O remains owned by Notepad3.
+// Folder sidebar panel, native tree and navigation policies. File I/O remains
+// owned by Notepad3; custom tree rows and filtering are separate from this shell.
 #include "Helpers.h"
 #include <shlwapi.h>
 #include <shellapi.h>
 #include <stdlib.h>
 #include "Sidebar.h"
+#include "SidebarDrawing.h"
 #include "PathLib.h"
 #include "Notepad3.h"
+#include "MuiLanguage.h"
 #include "Dialogs.h"
 #include "DarkMode/DarkMode.h"
 
 static HWND s_tree = NULL;
 static HWND s_splitter = NULL;
+static HWND s_panel = NULL;
+static HWND s_filter = NULL;
+static HWND s_tooltip = NULL;
+static SidebarDrawing* s_drawing = NULL;
+static UINT s_dpi = 96;
+static int s_hover = 0;
+static RECT s_filterRect, s_newRect, s_refreshRect, s_hiddenRect, s_sortRect;
 static int _Sidebar_ClampWidth(int logicalWidth, int clientWidth, UINT dpi);
+static void _Sidebar_UpdateChrome(void);
+
+// Opaque colors include the specified alpha blended against each local surface.
+typedef struct SidebarPalette {
+    COLORREF island, border, text, title, secondary, accent, button, buttonHot;
+    COLORREF filter, filterFocus, filterHotBorder, filterFocusBorder, status, divider, textHot;
+} SidebarPalette;
+static SidebarPalette const s_darkPalette = {
+    RGB(18,20,18), RGB(32,34,32), RGB(201,209,201), RGB(238,243,238), RGB(139,148,158), RGB(126,231,135),
+    RGB(27,31,27), RGB(37,43,37), RGB(26,30,26), RGB(21,25,21), RGB(38,48,38), RGB(63,92,65),
+    RGB(15,17,15), RGB(27,32,27), RGB(28,32,28)
+};
+static SidebarPalette const s_lightPalette = {
+    RGB(251,252,251), RGB(226,227,226), RGB(36,41,47), RGB(31,35,40), RGB(87,96,106), RGB(26,127,55),
+    RGB(236,238,236), RGB(227,234,227), RGB(236,238,236), RGB(238,242,238), RGB(196,204,196), RGB(26,127,55),
+    RGB(239,242,239), RGB(225,229,225), RGB(227,234,227)
+};
+static SidebarPalette const* s_palette = &s_lightPalette;
+
+// Main-window gaps must share the same background as the panel's outer corners.
+static COLORREF _Sidebar_Background(void)
+{
+    return UseDarkMode() ? RGB(12,13,12) : GetSysColor(COLOR_WINDOW);
+}
 
 // Icon indices belong to the shared Shell image list; never destroy that list.
 typedef struct SidebarIcon {
@@ -171,12 +205,10 @@ static LRESULT CALLBACK _Sidebar_SplitterProc(HWND hwnd, UINT message, WPARAM wP
     case WM_ERASEBKGND:
         return TRUE;
     case WM_PAINT: {
-        // Static controls do not inherit the tree's dark background automatically.
-        // Reuse the application's theme brush rather than introducing a palette.
         PAINTSTRUCT paint;
         HDC const dc = BeginPaint(hwnd, &paint);
-        HBRUSH const brush = UseDarkMode() && Globals.hbrDarkModeBkgBrush ? Globals.hbrDarkModeBkgBrush : GetSysColorBrush(COLOR_BTNFACE);
-        FillRect(dc, &paint.rcPaint, brush);
+        SetDCBrushColor(dc, _Sidebar_Background());
+        FillRect(dc, &paint.rcPaint, GetStockObject(DC_BRUSH));
         EndPaint(hwnd, &paint);
         return 0;
     }
@@ -195,7 +227,9 @@ static LRESULT CALLBACK _Sidebar_SplitterProc(HWND hwnd, UINT message, WPARAM wP
             RECT client;
             GetClientRect(parent, &client);
             UINT const dpi = Scintilla_GetWindowDPI(parent);
-            int const pixels = _Sidebar_ClampWidth(MulDiv(point.x, 96, dpi), client.right - MulDiv(4, dpi, 96), dpi);
+            // Persist the island width, excluding its left margin and the drag gap.
+            int const overhead = MulDiv(UseDarkMode() ? 24 : 16, dpi, 96) + (UseDarkMode() ? 2 : 0);
+            int const pixels = _Sidebar_ClampWidth(MulDiv(point.x - MulDiv(8, dpi, 96), 96, dpi), client.right - overhead, dpi);
             Settings.SidebarWidth = MulDiv(pixels, 96, dpi);
             UpdateUI(parent);
         }
@@ -207,6 +241,7 @@ static LRESULT CALLBACK _Sidebar_SplitterProc(HWND hwnd, UINT message, WPARAM wP
         return 0;
     case WM_NCDESTROY:
         RemoveWindowSubclass(hwnd, _Sidebar_SplitterProc, 0);
+        s_splitter = NULL;
         break;
     }
     return DefSubclassProc(hwnd, message, wParam, lParam);
@@ -571,10 +606,12 @@ void Sidebar_SetRoot(const HPATHL folder)
         }
     }
     Path_Release(normalized);
+    _Sidebar_UpdateChrome();
 }
 
 void Sidebar_SyncToFile(const HPATHL file)
 {
+    if (s_panel) { InvalidateRect(s_panel, NULL, FALSE); }
     if (!s_tree || !Settings.ShowSidebar || !TreeView_GetRoot(s_tree)) {
         return;
     }
@@ -678,7 +715,9 @@ sync:
     return loaded;
 }
 
-LRESULT Sidebar_OnNotify(const NMHDR* notification)
+// Handle tree expansion and file activation on the panel's UI thread. Return the
+// TreeView notification result, including cancellation when enumeration fails.
+static LRESULT _Sidebar_OnNotify(const NMHDR* notification)
 {
     if (notification->hwndFrom != s_tree) {
         return 0;
@@ -717,34 +756,323 @@ LRESULT Sidebar_OnNotify(const NMHDR* notification)
     return 0;
 }
 
+// Scale fixed design dimensions from 96-DPI logical pixels.
+static int _Sidebar_Pixels(int logical)
+{
+    return MulDiv(logical, s_dpi, 96);
+}
+
+// Place children wholly inside the island; minimum-height windows may hide the
+// tree, but never pass negative dimensions to native controls.
+static void _Sidebar_LayoutChildren(void)
+{
+    if (!s_panel) { return; }
+    RECT client;
+    GetClientRect(s_panel, &client);
+    int const pad = _Sidebar_Pixels(12);
+    int const diameter = _Sidebar_Pixels(30);
+    s_refreshRect = (RECT){ client.right - pad - diameter, _Sidebar_Pixels(22), client.right - pad, _Sidebar_Pixels(52) };
+    s_newRect = s_refreshRect;
+    OffsetRect(&s_newRect, -diameter - _Sidebar_Pixels(6), 0);
+    s_filterRect = (RECT){ pad, _Sidebar_Pixels(72), max_i(pad, client.right - pad), _Sidebar_Pixels(106) };
+    int const statusTop = max_i(0, client.bottom - _Sidebar_Pixels(30));
+    s_sortRect = (RECT){ client.right - _Sidebar_Pixels(46), statusTop + _Sidebar_Pixels(4), client.right - _Sidebar_Pixels(8), client.bottom - _Sidebar_Pixels(4) };
+    s_hiddenRect = s_sortRect;
+    OffsetRect(&s_hiddenRect, -_Sidebar_Pixels(30), 0);
+    s_hiddenRect.right -= _Sidebar_Pixels(8);
+    if (s_filter) {
+        int const editLeft = s_filterRect.left + _Sidebar_Pixels(32);
+        int const editHeight = max_i(0, min_i(_Sidebar_Pixels(22), statusTop - _Sidebar_Pixels(78)));
+        SetWindowPos(s_filter, NULL, editLeft, _Sidebar_Pixels(78),
+                     max_i(0, s_filterRect.right - editLeft - _Sidebar_Pixels(12)), editHeight, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    if (s_tree) {
+        int const treeTop = _Sidebar_Pixels(116);
+        SetWindowPos(s_tree, NULL, _Sidebar_Pixels(8), treeTop, max_i(0, client.right - _Sidebar_Pixels(16)),
+                     max_i(0, statusTop - treeTop - _Sidebar_Pixels(8)), SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    if (s_tooltip) {
+        TOOLINFOW tool = { sizeof(tool) };
+        tool.hwnd = s_panel;
+        tool.uId = 1;
+        tool.rect = (RECT){ _Sidebar_Pixels(12), _Sidebar_Pixels(12), max_i(0, s_newRect.left - _Sidebar_Pixels(6)), _Sidebar_Pixels(62) };
+        SendMessage(s_tooltip, TTM_NEWTOOLRECTW, 0, (LPARAM)&tool);
+    }
+    InvalidateRect(s_panel, NULL, FALSE);
+}
+
+// Root-dependent cue and availability use existing resources. T7 owns matching;
+// the EDIT remains a native text editor until that logic is integrated.
+static void _Sidebar_UpdateChrome(void)
+{
+    if (!s_panel || !s_filter) { return; }
+    bool const hasRoot = Path_IsExistingDirectory(Settings.SidebarFolder);
+    WCHAR hint[128];
+    GetLngString(hasRoot ? IDS_MUI_SIDEBAR_FILTER_HINT : IDS_MUI_SIDEBAR_FILTER_NO_ROOT, hint, COUNTOF(hint));
+    SendMessage(s_filter, EM_SETCUEBANNER, FALSE, (LPARAM)hint);
+    EnableWindow(s_filter, hasRoot);
+    InvalidateRect(s_panel, NULL, FALSE);
+}
+
+// Draw one complete panel into a memory DC. The status clip shares the island's
+// lower corners; no child or rectangular footer can cover the antialiased edge.
+static void _Sidebar_Paint(HDC dc)
+{
+    RECT client;
+    GetClientRect(s_panel, &client);
+    SetDCBrushColor(dc, _Sidebar_Background());
+    FillRect(dc, &client, GetStockObject(DC_BRUSH));
+    if (!s_drawing || IsRectEmpty(&client)) { return; }
+    SidebarPalette const* p = s_palette;
+    SidebarDrawing_RoundRect(dc, client, _Sidebar_Pixels(16), p->island, CLR_INVALID);
+    int const statusTop = max_i(0, client.bottom - _Sidebar_Pixels(30));
+    int const saved = SaveDC(dc);
+    // The interior clip leaves the 1px border to the antialiased final stroke.
+    HRGN const interior = CreateRoundRectRgn(1, 1, client.right, client.bottom, _Sidebar_Pixels(32), _Sidebar_Pixels(32));
+    if (interior) {
+        ExtSelectClipRgn(dc, interior, RGN_AND);
+        DeleteObject(interior);
+    }
+    RECT footer = { 0, statusTop, client.right, client.bottom };
+    SetDCBrushColor(dc, p->status);
+    FillRect(dc, &footer, GetStockObject(DC_BRUSH));
+    RECT line = { 0, statusTop, client.right, statusTop + 1 };
+    SetDCBrushColor(dc, p->divider);
+    FillRect(dc, &line, GetStockObject(DC_BRUSH));
+    WCHAR label[128], sort[32];
+    GetLngString(IDS_MUI_SIDEBAR_LABEL, label, COUNTOF(label));
+    GetLngString(IDS_MUI_SIDEBAR_SORT_NAME, sort, COUNTOF(sort));
+    int const badgeWidth = SidebarDrawing_Measure(dc, s_drawing, label, SidebarFontBold) + _Sidebar_Pixels(26);
+    RECT badge = { 0, statusTop + 1, min_i(badgeWidth, client.right), client.bottom };
+    SetDCBrushColor(dc, RGB(126,231,135));
+    FillRect(dc, &badge, GetStockObject(DC_BRUSH));
+    badge.left += _Sidebar_Pixels(16);
+    SidebarDrawing_Text(dc, s_drawing, label, SidebarFontBold, badge, RGB(11,12,11));
+    if (s_hover == 4) { SidebarDrawing_RoundRect(dc, s_hiddenRect, _Sidebar_Pixels(4), p->textHot, CLR_INVALID); }
+    if (s_hover == 5) { SidebarDrawing_RoundRect(dc, s_sortRect, _Sidebar_Pixels(4), p->textHot, CLR_INVALID); }
+    SidebarDrawing_Text(dc, s_drawing, L".*", SidebarFontSmall, s_hiddenRect, p->secondary);
+    SidebarDrawing_Text(dc, s_drawing, sort, SidebarFontSmall, s_sortRect, p->secondary);
+    // Empty path handles can own a NULL buffer during startup, before FileLoad.
+    LPCWSTR current = Path_IsNotEmpty(Paths.CurrentFile) ? Path_Get(Paths.CurrentFile) : L"";
+    LPCWSTR const relative = Path_IsNotEmpty(Settings.SidebarFolder) ? _Sidebar_RelativePath(Path_Get(Settings.SidebarFolder), current) : NULL;
+    if (relative) { current = relative; }
+    RECT pathRect = { badgeWidth + _Sidebar_Pixels(8), statusTop, s_hiddenRect.left - _Sidebar_Pixels(8), client.bottom };
+    SidebarDrawing_Text(dc, s_drawing, current, SidebarFontSmall, pathRect, p->secondary);
+    RestoreDC(dc, saved);
+
+    SidebarDrawing_RoundRect(dc, client, _Sidebar_Pixels(16), CLR_INVALID, p->border);
+
+    HPATHL parent = Path_Copy(Settings.SidebarFolder);
+    LPCWSTR name = Path_FindFileName(parent);
+    WCHAR empty[128];
+    if (Path_IsEmpty(parent)) {
+        GetLngString(IDS_MUI_SIDEBAR_NO_FOLDER, empty, COUNTOF(empty));
+        name = empty;
+    } else if (!*name) {
+        name = Path_Get(parent);
+    }
+    RECT arrow = { _Sidebar_Pixels(16), _Sidebar_Pixels(16), _Sidebar_Pixels(34), _Sidebar_Pixels(38) };
+    SidebarDrawing_Text(dc, s_drawing, L"\x276f", SidebarFontTitle, arrow, p->accent);
+    RECT title = { _Sidebar_Pixels(35), _Sidebar_Pixels(16), s_newRect.left - _Sidebar_Pixels(6), _Sidebar_Pixels(38) };
+    SidebarDrawing_Text(dc, s_drawing, name, SidebarFontTitle, title, p->title);
+    Path_RemoveFileSpec(parent);
+    LPCWSTR parentText = Path_Get(parent);
+    if (Path_IsEmpty(Settings.SidebarFolder)) {
+        GetLngString(IDS_MUI_SIDEBAR_CHOOSE_HINT, empty, COUNTOF(empty));
+        parentText = empty;
+    }
+    RECT subTitle = { _Sidebar_Pixels(35), _Sidebar_Pixels(42), title.right, _Sidebar_Pixels(58) };
+    SidebarDrawing_Text(dc, s_drawing, parentText, SidebarFontSmall, subTitle, p->secondary);
+    Path_Release(parent);
+    SidebarDrawing_RoundRect(dc, s_newRect, _Sidebar_Pixels(15), s_hover == 1 ? p->buttonHot : p->button, CLR_INVALID);
+    SidebarDrawing_RoundRect(dc, s_refreshRect, _Sidebar_Pixels(15), s_hover == 2 ? p->buttonHot : p->button, CLR_INVALID);
+    SidebarDrawing_Icon(dc, s_newRect, false, p->secondary, s_dpi);
+    SidebarDrawing_Icon(dc, s_refreshRect, true, p->secondary, s_dpi);
+    bool const focused = GetFocus() == s_filter;
+    SidebarDrawing_RoundRect(dc, s_filterRect, _Sidebar_Pixels(17), focused ? p->filterFocus : p->filter,
+                            focused ? p->filterFocusBorder : (s_hover == 3 ? p->filterHotBorder : CLR_INVALID));
+    RECT slash = s_filterRect;
+    slash.left += _Sidebar_Pixels(14);
+    slash.right = slash.left + _Sidebar_Pixels(12);
+    SidebarDrawing_Text(dc, s_drawing, L"/", SidebarFontBold, slash, p->accent);
+}
+
+// Panel messages terminate tree notifications here, before the main window's
+// editor notification guard. Resource release occurs after child destruction.
+static LRESULT CALLBACK _Sidebar_PanelProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    switch (message) {
+    case WM_ERASEBKGND:
+        return TRUE;
+    case WM_PAINT: {
+        PAINTSTRUCT paint;
+        HDC const dc = BeginPaint(hwnd, &paint);
+        RECT client;
+        GetClientRect(hwnd, &client);
+        HDC const memory = CreateCompatibleDC(dc);
+        HBITMAP const bitmap = CreateCompatibleBitmap(dc, max_i(1, client.right), max_i(1, client.bottom));
+        if (memory && bitmap) {
+            HGDIOBJ const previous = SelectObject(memory, bitmap);
+            _Sidebar_Paint(memory);
+            BitBlt(dc, 0, 0, client.right, client.bottom, memory, 0, 0, SRCCOPY);
+            SelectObject(memory, previous);
+        } else {
+            _Sidebar_Paint(dc);
+        }
+        if (bitmap) { DeleteObject(bitmap); }
+        if (memory) { DeleteDC(memory); }
+        EndPaint(hwnd, &paint);
+        return 0;
+    }
+    case WM_PRINTCLIENT:
+        _Sidebar_Paint((HDC)wParam);
+        return 0;
+    case WM_SIZE:
+        _Sidebar_LayoutChildren();
+        return 0;
+    case WM_NOTIFY:
+        if (((NMHDR*)lParam)->hwndFrom == s_tooltip && ((NMHDR*)lParam)->code == TTN_GETDISPINFOW) {
+            ((NMTTDISPINFOW*)lParam)->lpszText = (LPWSTR)(Path_IsNotEmpty(Settings.SidebarFolder) ? Path_Get(Settings.SidebarFolder) : L"");
+            return 0;
+        }
+        return _Sidebar_OnNotify((NMHDR*)lParam);
+    case WM_COMMAND:
+        if ((HWND)lParam == s_filter && (HIWORD(wParam) == EN_SETFOCUS || HIWORD(wParam) == EN_KILLFOCUS)) {
+            InvalidateRect(hwnd, &s_filterRect, FALSE);
+            InvalidateRect(s_filter, NULL, TRUE);
+        }
+        return 0;
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORSTATIC:
+        if ((HWND)lParam == s_filter) {
+            SetTextColor((HDC)wParam, s_palette->text);
+            SetBkColor((HDC)wParam, GetFocus() == s_filter ? s_palette->filterFocus : s_palette->filter);
+            // DC_BRUSH avoids a focus-only brush allocation and keeps the EDIT opaque.
+            SetDCBrushColor((HDC)wParam, GetFocus() == s_filter ? s_palette->filterFocus : s_palette->filter);
+            return (LRESULT)GetStockObject(DC_BRUSH);
+        }
+        break;
+    case WM_MOUSEMOVE: {
+        POINT const point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        int const hover = PtInRect(&s_newRect, point) ? 1 : PtInRect(&s_refreshRect, point) ? 2 :
+                          PtInRect(&s_filterRect, point) ? 3 : PtInRect(&s_hiddenRect, point) ? 4 : PtInRect(&s_sortRect, point) ? 5 : 0;
+        if (hover != s_hover) { s_hover = hover; InvalidateRect(hwnd, NULL, FALSE); }
+        TRACKMOUSEEVENT tracking = { sizeof(tracking), TME_LEAVE, hwnd, 0 };
+        TrackMouseEvent(&tracking);
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        s_hover = 0;
+        InvalidateRect(hwnd, NULL, FALSE);
+        return 0;
+    case WM_LBUTTONDOWN: {
+        POINT const point = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        if (PtInRect(&s_filterRect, point) && IsWindowEnabled(s_filter)) { SetFocus(s_filter); }
+        return 0;
+    }
+    case WM_NCDESTROY:
+        s_panel = s_filter = s_tooltip = NULL;
+        SidebarDrawing_Destroy(s_drawing);
+        s_drawing = NULL;
+        return 0;
+    }
+    return DefWindowProc(hwnd, message, wParam, lParam);
+}
+
+// The EDIT covers the middle of the capsule, so it must also track hover. Install
+// this subclass once; theme and DPI updates only replace drawing resources.
+static LRESULT CALLBACK _Sidebar_FilterProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR id, DWORD_PTR data)
+{
+    UNREFERENCED_PARAMETER(id);
+    UNREFERENCED_PARAMETER(data);
+    if (message == WM_MOUSEMOVE) {
+        if (s_hover != 3) { s_hover = 3; InvalidateRect(s_panel, &s_filterRect, FALSE); }
+        TRACKMOUSEEVENT tracking = { sizeof(tracking), TME_LEAVE, hwnd, 0 };
+        TrackMouseEvent(&tracking);
+    } else if (message == WM_MOUSELEAVE) {
+        s_hover = 0;
+        InvalidateRect(s_panel, &s_filterRect, FALSE);
+    } else if (message == WM_NCDESTROY) {
+        RemoveWindowSubclass(hwnd, _Sidebar_FilterProc, 0);
+    }
+    return DefSubclassProc(hwnd, message, wParam, lParam);
+}
+
 bool Sidebar_Create(HWND parent)
 {
-    s_tree = CreateWindowEx(WS_EX_CLIENTEDGE, WC_TREEVIEW, NULL,
-                           WS_CHILD | WS_CLIPSIBLINGS | TVS_HASBUTTONS | TVS_HASLINES |
+    WNDCLASSW panelClass = { 0 };
+    panelClass.lpfnWndProc = _Sidebar_PanelProc;
+    panelClass.hInstance = Globals.hInstance;
+    panelClass.hCursor = LoadCursor(NULL, IDC_ARROW);
+    panelClass.lpszClassName = L"Notepad3Sidebar";
+    if (!RegisterClassW(&panelClass) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) { return false; }
+    s_dpi = Scintilla_GetWindowDPI(parent);
+    s_drawing = SidebarDrawing_Create(s_dpi);
+    if (!s_drawing) { return false; }
+    s_panel = CreateWindowEx(0, panelClass.lpszClassName, NULL, WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+                            0, 0, 0, 0, parent, NULL, Globals.hInstance, NULL);
+    if (!s_panel) {
+        SidebarDrawing_Destroy(s_drawing);
+        s_drawing = NULL;
+        return false;
+    }
+    // Create the original tree first so existing SysTreeView321 lookups remain valid.
+    s_tree = CreateWindowEx(0, WC_TREEVIEW, NULL,
+                           WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TVS_HASBUTTONS | TVS_HASLINES |
                            TVS_LINESATROOT | TVS_SHOWSELALWAYS | TVS_DISABLEDRAGDROP,
-                           0, 0, 0, 0, parent, (HMENU)IDC_SIDEBAR_TREE, Globals.hInstance, NULL);
+                           0, 0, 0, 0, s_panel, (HMENU)IDC_SIDEBAR_TREE, Globals.hInstance, NULL);
+    s_filter = CreateWindowEx(0, WC_EDIT, NULL, WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                             0, 0, 0, 0, s_panel, (HMENU)1, Globals.hInstance, NULL);
+    s_tooltip = CreateWindowEx(WS_EX_TOPMOST, TOOLTIPS_CLASS, NULL, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+                              CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, s_panel, NULL, Globals.hInstance, NULL);
     s_splitter = CreateWindowEx(0, WC_STATIC, NULL, WS_CHILD | WS_CLIPSIBLINGS,
                                0, 0, 0, 0, parent, (HMENU)IDC_SIDEBAR_SPLIT, Globals.hInstance, NULL);
-    if (!s_tree || !s_splitter || !SetWindowSubclass(s_splitter, _Sidebar_SplitterProc, 0, 0) ||
-        !SetWindowSubclass(s_tree, _Sidebar_TreeProc, 0, 0)) {
-        if (s_tree) { DestroyWindow(s_tree); }
+    if (!s_tree || !s_filter || !s_tooltip || !s_splitter || !SetWindowSubclass(s_splitter, _Sidebar_SplitterProc, 0, 0) ||
+        !SetWindowSubclass(s_tree, _Sidebar_TreeProc, 0, 0) || !SetWindowSubclass(s_filter, _Sidebar_FilterProc, 0, 0)) {
+        DestroyWindow(s_panel);
         if (s_splitter) { DestroyWindow(s_splitter); }
         s_tree = s_splitter = NULL;
         return false;
     }
+    TOOLINFOW tool = { sizeof(tool) };
+    tool.uFlags = TTF_SUBCLASS;
+    tool.hwnd = s_panel;
+    tool.uId = 1;
+    tool.lpszText = LPSTR_TEXTCALLBACKW;
+    if (!SendMessage(s_tooltip, TTM_ADDTOOLW, 0, (LPARAM)&tool)) {
+        DestroyWindow(s_panel);
+        DestroyWindow(s_splitter);
+        return false;
+    }
+    SendMessage(s_tooltip, TTM_SETMAXTIPWIDTH, 0, _Sidebar_Pixels(600));
     // InitTreeView owns subclass data until destruction; installing it again leaks it.
     InitWindowCommon(s_tree, true);
     InitTreeView(s_tree);
     TreeView_SetExtendedStyle(s_tree, TVS_EX_DOUBLEBUFFER, TVS_EX_DOUBLEBUFFER);
     Sidebar_OnThemeChanged();
     // Root restoration is deferred until after startup's FileLoad.
-    ShowWindow(s_tree, Settings.ShowSidebar ? SW_SHOWNA : SW_HIDE);
+    _Sidebar_UpdateChrome();
+    ShowWindow(s_panel, Settings.ShowSidebar ? SW_SHOWNA : SW_HIDE);
     ShowWindow(s_splitter, Settings.ShowSidebar ? SW_SHOWNA : SW_HIDE);
     return true;
 }
 
 bool Sidebar_PreTranslateMessage(MSG* message)
 {
+    if (message->hwnd == s_filter && message->message >= WM_KEYFIRST && message->message <= WM_KEYLAST &&
+        GetKeyState(VK_MENU) >= 0) {
+        bool const control = GetKeyState(VK_CONTROL) < 0;
+        if (!control || message->message == WM_CHAR || message->wParam == 'A' || message->wParam == 'C' || message->wParam == 'V' ||
+            message->wParam == 'X' || message->wParam == 'Z') {
+            if (!control && message->message == WM_KEYDOWN && (message->wParam == VK_ESCAPE || message->wParam == VK_TAB)) {
+                SetFocus(Globals.hwndEdit);
+                return true;
+            }
+            TranslateMessage(message);
+            DispatchMessage(message);
+            return true;
+        }
+    }
     if (!s_tree || message->hwnd != s_tree || message->message < WM_KEYFIRST ||
         message->message > WM_KEYLAST || GetKeyState(VK_CONTROL) < 0 || GetKeyState(VK_MENU) < 0) {
         return false;
@@ -790,7 +1118,7 @@ void Sidebar_Show(bool visible)
     if (!s_tree) {
         return;
     }
-    if (!visible && (GetFocus() == s_tree || GetFocus() == s_splitter)) {
+    if (!visible && (IsChild(s_panel, GetFocus()) || GetFocus() == s_panel || GetFocus() == s_splitter)) {
         SetFocus(Globals.hwndEdit);
     }
     if (visible && !TreeView_GetRoot(s_tree) && Path_IsExistingDirectory(Settings.SidebarFolder)) {
@@ -799,7 +1127,7 @@ void Sidebar_Show(bool visible)
     if (visible) {
         Sidebar_SyncToFile(Paths.CurrentFile);
     }
-    ShowWindow(s_tree, visible ? SW_SHOWNA : SW_HIDE);
+    ShowWindow(s_panel, visible ? SW_SHOWNA : SW_HIDE);
     ShowWindow(s_splitter, visible ? SW_SHOWNA : SW_HIDE);
 }
 
@@ -808,14 +1136,17 @@ void Sidebar_Layout(RECT* available)
     if (!s_tree || !Settings.ShowSidebar) {
         return;
     }
-    UINT const dpi = Scintilla_GetWindowDPI(GetParent(s_tree));
-    int const split = MulDiv(4, dpi, 96);
-    // The editor reserve must exclude the splitter as well as the tree itself.
-    int const width = _Sidebar_ClampWidth(Settings.SidebarWidth, available->right - available->left - split, dpi);
-    int const height = max_i(0, available->bottom - available->top);
-    SetWindowPos(s_tree, NULL, available->left, available->top, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
-    SetWindowPos(s_splitter, NULL, available->left + width, available->top, split, height, SWP_NOZORDER | SWP_NOACTIVATE);
-    available->left += width + split;
+    UINT const dpi = Scintilla_GetWindowDPI(s_panel);
+    int const split = MulDiv(8, dpi, 96);
+    // Dark-mode outer margins have already been applied to the editor rectangle.
+    int const left = available->left + (UseDarkMode() ? 0 : MulDiv(8, dpi, 96));
+    int const top = available->top + (UseDarkMode() ? 0 : MulDiv(2, dpi, 96));
+    int const bottom = available->bottom - (UseDarkMode() ? 0 : MulDiv(8, dpi, 96));
+    int const width = _Sidebar_ClampWidth(Settings.SidebarWidth, available->right - left - split - (UseDarkMode() ? 2 : 0), dpi);
+    int const height = max_i(0, bottom - top);
+    SetWindowPos(s_panel, NULL, left, top, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
+    SetWindowPos(s_splitter, NULL, left + width, top, split, height, SWP_NOZORDER | SWP_NOACTIVATE);
+    available->left = left + width + split;
 }
 
 void Sidebar_OnThemeChanged(void)
@@ -823,8 +1154,19 @@ void Sidebar_OnThemeChanged(void)
     if (!s_tree) {
         return;
     }
+    s_dpi = Scintilla_GetWindowDPI(s_panel);
+    s_palette = UseDarkMode() ? &s_darkPalette : &s_lightPalette;
+    SidebarDrawing* replacement = SidebarDrawing_Create(s_dpi);
+    if (replacement) {
+        SidebarDrawing* previous = s_drawing;
+        s_drawing = replacement;
+        SendMessage(s_filter, WM_SETFONT, (WPARAM)SidebarDrawing_EditFont(s_drawing), TRUE);
+        SidebarDrawing_Destroy(previous);
+    }
     // Match the style dialog: let the existing subclass update colors and redraw.
     SendMessage(s_tree, WM_THEMECHANGED, 0, 0);
+    TreeView_SetBkColor(s_tree, s_palette->island);
+    TreeView_SetTextColor(s_tree, s_palette->text);
     s_iconCount = 0;
     SHFILEINFOW info = { 0 };
     // A synthetic directory name yields the folder icon; a drive root yields a drive icon.
@@ -836,4 +1178,6 @@ void Sidebar_OnThemeChanged(void)
     AllowDarkModeForWindowEx(s_tree, UseDarkMode());
     AllowDarkModeForWindowEx(s_splitter, UseDarkMode());
 #endif
+    _Sidebar_UpdateChrome();
+    _Sidebar_LayoutChildren();
 }

@@ -57,6 +57,9 @@
     <ClCompile Include="Dlapi.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="SidebarDrawing.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
     <ClCompile Include="Sidebar.c">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -465,6 +468,9 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Dlapi.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="SidebarDrawing.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="Sidebar.h">

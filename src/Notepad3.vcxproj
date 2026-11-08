@@ -267,7 +267,7 @@
       <SDLCheck>true</SDLCheck>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>scintilla.lib;lexilla.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>scintilla.lib;lexilla.lib;gdiplus.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>DebugFull</GenerateDebugInformation>
       <SubSystem>Windows</SubSystem>
       <TargetMachine>MachineX86</TargetMachine>
@@ -341,7 +341,7 @@
       <SDLCheck>true</SDLCheck>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>scintilla.lib;lexilla.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>scintilla.lib;lexilla.lib;gdiplus.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>DebugFull</GenerateDebugInformation>
       <SubSystem>Windows</SubSystem>
       <TargetMachine>MachineX64</TargetMachine>
@@ -416,7 +416,7 @@
       <SDLCheck>true</SDLCheck>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>scintilla.lib;lexilla.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>scintilla.lib;lexilla.lib;gdiplus.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>DebugFull</GenerateDebugInformation>
       <SubSystem>Windows</SubSystem>
       <AdditionalLibraryDirectories>$(OutputPath)obj;$(ClangAnalysisToolsPath)\..\lib\clang\16\lib\windows\;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
@@ -494,7 +494,7 @@
       <SDLCheck>false</SDLCheck>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>scintilla.lib;lexilla.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>scintilla.lib;lexilla.lib;gdiplus.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <MergeSections>.rdata=.text</MergeSections>
       <OptimizeReferences>true</OptimizeReferences>
@@ -580,7 +580,7 @@
       <SDLCheck>false</SDLCheck>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>scintilla.lib;lexilla.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>scintilla.lib;lexilla.lib;gdiplus.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <MergeSections>.rdata=.text</MergeSections>
       <OptimizeReferences>true</OptimizeReferences>
@@ -665,7 +665,7 @@
       <SDLCheck>false</SDLCheck>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>scintilla.lib;lexilla.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>scintilla.lib;lexilla.lib;gdiplus.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <MergeSections>.rdata=.text</MergeSections>
       <OptimizeReferences>true</OptimizeReferences>
@@ -750,7 +750,7 @@
       <SDLCheck>false</SDLCheck>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>scintilla.lib;lexilla.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>scintilla.lib;lexilla.lib;gdiplus.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <MergeSections>.rdata=.text</MergeSections>
       <OptimizeReferences>true</OptimizeReferences>
@@ -836,7 +836,7 @@
       <SDLCheck>false</SDLCheck>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>scintilla.lib;lexilla.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>scintilla.lib;lexilla.lib;gdiplus.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <MergeSections>.rdata=.text</MergeSections>
       <OptimizeReferences>true</OptimizeReferences>
@@ -922,7 +922,7 @@
       <SDLCheck>false</SDLCheck>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>scintilla.lib;lexilla.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>scintilla.lib;lexilla.lib;gdiplus.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <GenerateDebugInformation>false</GenerateDebugInformation>
       <MergeSections>.rdata=.text</MergeSections>
       <OptimizeReferences>true</OptimizeReferences>
@@ -1057,6 +1057,7 @@
     <ClCompile Include="Dialogs.c" />
     <ClCompile Include="Dlapi.c" />
     <ClCompile Include="Sidebar.c" />
+    <ClCompile Include="SidebarDrawing.cpp" />
     <ClCompile Include="Edit.c" />
     <ClCompile Include="EditRTF.cpp" />
     <ClCompile Include="Encoding.c" />
@@ -1185,6 +1186,7 @@
     <ClInclude Include="Dialogs.h" />
     <ClInclude Include="Dlapi.h" />
     <ClInclude Include="Sidebar.h" />
+    <ClInclude Include="SidebarDrawing.h" />
     <ClInclude Include="Edit.h" />
     <ClInclude Include="EditRTF.h" />
     <ClInclude Include="Encoding.h" />

@@ -16,9 +16,11 @@ try {
     tree := 0
     try tree := ControlGetHwnd('SysTreeView321', main)
     Check(tree != 0 && DllCall('IsWindowVisible', 'ptr', tree), 'A visible SysTreeView32 exists')
+    panel := DllCall('GetParent', 'ptr', tree, 'ptr')
+    Check(WinGetClass(panel) = 'Notepad3Sidebar' && DllCall('GetParent', 'ptr', panel, 'ptr') = main, 'A tree belongs to the sidebar panel')
     editor := ControlGetHwnd('Scintilla1', main)
     dpi := DllCall('GetDpiForWindow', 'ptr', main, 'uint')
-    ControlGetPos(&tx, &ty, &tw, &th, tree)
+    ControlGetPos(&tx, &ty, &tw, &th, panel)
     Check(Abs(tw - 300 * dpi / 96) <= 4, 'A width is 300 logical pixels (actual ' tw ', DPI ' dpi ')')
     ; Check startup before Show/Refresh can populate or repair an empty tree.
     if Ord(through) >= Ord('B') {
@@ -27,20 +29,21 @@ try {
         Check(TreeText(tree, root) = 'fixture', 'B startup root is test directory name')
         WaitUntil(() => TreeText(tree, SendMessage(0x110A, 9, 0, tree)) = 'a.txt', 'B startup command line file selected before any toggle')
     }
-    DragWidth(tree, 50)
-    ControlGetPos(, , &tw, , tree)
+    DragWidth(panel, 50)
+    ControlGetPos(, , &tw, , panel)
     Check(Abs(tw - 100 * dpi / 96) <= 4, 'A dragging enforces minimum width')
-    DragWidth(tree, 4000)
+    DragWidth(panel, 4000)
     ControlGetPos(, , &editorWidth, , editor)
     Check(editorWidth >= 200 * dpi / 96 - 4, 'A dragging reserves editor width')
-    DragWidth(tree, 300)
-    ControlGetPos(, , &tw, , tree)
+    DragWidth(panel, 300)
+    ControlGetPos(, , &tw, , panel)
     Check(Abs(tw - 300 * dpi / 96) <= 4, 'A dragging restores requested width')
     PostMessage(0x111, 41066, 0, , main)
-    WaitUntil(() => !DllCall('IsWindowVisible', 'ptr', tree), 'A hide command hides tree')
-    WaitUntil(() => ControlLeft(editor) <= 4, 'A hidden sidebar restores editor left edge')
+    WaitUntil(() => !DllCall('IsWindowVisible', 'ptr', panel) && !DllCall('IsWindowVisible', 'ptr', tree), 'A hide command hides panel and tree')
+    expectedLeft := themeName = 'Dark' ? 9 * dpi / 96 : 0
+    WaitUntil(() => Abs(ControlLeft(editor) - expectedLeft) <= 4, 'A hidden sidebar restores themed editor left edge')
     PostMessage(0x111, 41066, 0, , main)
-    WaitUntil(() => DllCall('IsWindowVisible', 'ptr', tree), 'A show command restores tree')
+    WaitUntil(() => DllCall('IsWindowVisible', 'ptr', panel) && DllCall('IsWindowVisible', 'ptr', tree), 'A show command restores panel and tree')
     if Ord(through) >= Ord('B') {
         root := SendMessage(0x110A, 0, 0, tree)
         Check(root != 0, 'B root exists')
@@ -228,7 +231,8 @@ try {
     DllCall('SetWindowPos', 'ptr', main, 'ptr', 0, 'int', 80, 'int', 80, 'int', 1100, 'int', 750, 'uint', 0x14)
     tree := ControlGetHwnd('SysTreeView321', main)
     dpi := DllCall('GetDpiForWindow', 'ptr', main, 'uint')
-    ControlGetPos(, , &tw, , tree)
+    panel := DllCall('GetParent', 'ptr', tree, 'ptr')
+    ControlGetPos(, , &tw, , panel)
     Check(Abs(tw - 300 * dpi / 96) <= 4, 'A restart restores 300 logical pixel width (actual ' tw ', DPI ' dpi ')')
     FinishSidebarScenario('A restart')
     if Ord(through) >= Ord('F') && (scenario = 'All' || scenario = 'ShortPath')
@@ -430,13 +434,13 @@ CloseTestWindow(window) {
 }
 
 ; Exercise the actual splitter's capture/drag path with client-coordinate messages.
-; logicalWidth is the desired left-pane width in 96-DPI logical pixels.
-DragWidth(tree, logicalWidth) {
-    parent := DllCall('GetParent', 'ptr', tree, 'ptr')
+; logicalWidth is the island width in 96-DPI pixels; its left margin adds 8.
+DragWidth(panel, logicalWidth) {
+    parent := DllCall('GetParent', 'ptr', panel, 'ptr')
     split := DllCall('GetDlgItem', 'ptr', parent, 'int', 0xFB0A, 'ptr')
     dpi := DllCall('GetDpiForWindow', 'ptr', parent, 'uint')
     ControlGetPos(&left, , , , split)
-    point := (Round(logicalWidth * dpi / 96) - left) & 0xffff
+    point := (Round((logicalWidth + 8) * dpi / 96) - left) & 0xffff
     SendMessage(0x201, 1, 0, split)
     SendMessage(0x200, 1, point, split)
     SendMessage(0x202, 0, 0, split)

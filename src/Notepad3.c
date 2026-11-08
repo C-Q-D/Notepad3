@@ -2610,6 +2610,15 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT umsg, WPARAM wParam, LPARAM lParam)
     case WM_SIZE:
         return MsgSize(hwnd, wParam, lParam);
 
+    case WM_ERASEBKGND: {
+        // Paint the island margins independently of editor and system dark colors.
+        RECT client;
+        GetClientRect(hwnd, &client);
+        SetDCBrushColor((HDC)wParam, UseDarkMode() ? RGB(12,13,12) : GetSysColor(COLOR_WINDOW));
+        FillRect((HDC)wParam, &client, GetStockObject(DC_BRUSH));
+        return TRUE;
+    }
+
 #ifdef D_NP3_WIN10_DARK_MODE
     case WM_SETTINGCHANGE: {
         if (IsColorSchemeChangeMessage(lParam)) {
@@ -3123,10 +3132,30 @@ static bool _EvalTinyExpr(bool qmark)
 }
 
 
-//=============================================================================
-//
-//  _InitEditWndFrame()
-//
+// Paint only the editor's square outer frame. The editor remains a sibling above
+// it and retains its own theme; frame resources belong to the existing window.
+static LRESULT CALLBACK _EditFrameProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam, UINT_PTR id, DWORD_PTR data)
+{
+    UNREFERENCED_PARAMETER(id);
+    UNREFERENCED_PARAMETER(data);
+    if (UseDarkMode() && (message == WM_PAINT || message == WM_PRINTCLIENT)) {
+        PAINTSTRUCT paint;
+        HDC const dc = message == WM_PAINT ? BeginPaint(hwnd, &paint) : (HDC)wParam;
+        RECT client;
+        GetClientRect(hwnd, &client);
+        // White at 5% over #0C0D0C, stored as the opaque frame color.
+        SetDCBrushColor(dc, RGB(24,25,24));
+        FillRect(dc, &client, GetStockObject(DC_BRUSH));
+        if (message == WM_PAINT) { EndPaint(hwnd, &paint); }
+        return 0;
+    }
+    if (UseDarkMode() && message == WM_ERASEBKGND) { return TRUE; }
+    if (message == WM_NCDESTROY) { RemoveWindowSubclass(hwnd, _EditFrameProc, 0); }
+    return DefSubclassProc(hwnd, message, wParam, lParam);
+}
+
+// Reapply native theme state and frame thickness; subclass installation is once
+// at creation, while this entry also runs on DPI and theme updates.
 static void _InitEditWndFrame()
 {
     s_cxEditFrame = 0;
@@ -3135,6 +3164,12 @@ static void _InitEditWndFrame()
     s_bIsAppThemed = IsAppThemed();
 
     InitWindowCommon(s_hwndEditFrame, true);
+    LONG_PTR const frameStyle = GetWindowLongPtr(s_hwndEditFrame, GWL_EXSTYLE);
+    SetWindowLongPtr(s_hwndEditFrame, GWL_EXSTYLE, frameStyle & ~WS_EX_CLIENTEDGE);
+    SetWindowPos(s_hwndEditFrame, NULL, 0, 0, 0, 0, SWP_NOZORDER | SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED);
+    if (UseDarkMode()) {
+        s_cxEditFrame = s_cyEditFrame = 1;
+    }
 
     if (s_bIsAppThemed) {
 
@@ -3203,6 +3238,7 @@ LRESULT MsgCreate(HWND hwnd, WPARAM wParam,LPARAM lParam)
         hInstance,
         NULL);
 
+    if (!s_hwndEditFrame || !SetWindowSubclass(s_hwndEditFrame, _EditFrameProc, 0, 0)) { return -1; }
     _InitEditWndFrame();
 
     // Create Toolbar and Statusbar
@@ -3849,16 +3885,25 @@ LRESULT MsgSize(HWND hwnd, WPARAM wParam, LPARAM lParam)
     // Statusbar sectors use the full client width, independent of the editor.
     s_WinCurrentWidth = cx;
     RECT available = { x, y, x + cx, y + cy };
+    if (UseDarkMode()) {
+        UINT const dpi = Scintilla_GetWindowDPI(hwnd);
+        available.left += MulDiv(8, dpi, 96);
+        available.right = max_i(available.left, available.right - MulDiv(8, dpi, 96));
+        available.top += MulDiv(2, dpi, 96);
+        available.bottom = max_i(available.top, available.bottom - MulDiv(8, dpi, 96));
+    }
     Sidebar_Layout(&available);
     x = available.left;
+    y = available.top;
     cx = max_i(0, available.right - available.left);
+    cy = max_i(0, available.bottom - available.top);
 
     HDWP const hdwp = BeginDeferWindowPos(2);
 
     DeferWindowPos(hdwp,s_hwndEditFrame,NULL,x,y,cx,cy, SWP_NOZORDER | SWP_NOACTIVATE);
 
     DeferWindowPos(hdwp, g_hwndEditWindow, s_hwndEditFrame,
-                   x+s_cxEditFrame,y+s_cyEditFrame, cx-2*s_cxEditFrame,cy-2*s_cyEditFrame,
+                   x+s_cxEditFrame,y+s_cyEditFrame, max_i(0,cx-2*s_cxEditFrame),max_i(0,cy-2*s_cyEditFrame),
                    SWP_NOZORDER | SWP_NOACTIVATE);
 
     EndDeferWindowPos(hdwp);
@@ -10265,11 +10310,6 @@ static bool s_tb_reset_already = false;
 LRESULT MsgNotify(HWND hwnd, WPARAM wParam, LPARAM lParam)
 {
     UNREFERENCED_PARAMETER(wParam);
-    // FileLoad can synchronously expand the tree during an editor notification.
-    // Tree notifications must therefore precede the editor's reentrancy guard.
-    if (((NMHDR*)lParam)->idFrom == IDC_SIDEBAR_TREE) {
-        return Sidebar_OnNotify((NMHDR*)lParam);
-    }
     LRESULT result = FALSE;
 
     SET_FCT_GUARD(result)
