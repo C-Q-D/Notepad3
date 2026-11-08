@@ -17,6 +17,9 @@ int Sidebar_GetStrokeWidth(UINT dpi);
 bool Sidebar_Create(HWND parent);
 // Show or hide the panel and drag gap; hiding returns focus from any panel child.
 void Sidebar_Show(bool visible);
+// Stop pending search/navigation before FileSave can enter a closing modal loop.
+// Retain the text; if closing is cancelled, search again without the old action.
+void Sidebar_CancelPending(void);
 // Place the sidebar in the available client rectangle and consume its left edge.
 // The caller uses the remaining rectangle for the editor; width is in pixels.
 void Sidebar_Layout(RECT* available);
@@ -34,8 +37,9 @@ void Sidebar_SetRoot(const HPATHL folder);
 // Refresh recent files independently of the root and visibility. fileOpened is
 // true only for a successful open/explicit same-file activation: remove that
 // nonempty file from sidebar hides. Reloads (including automatic file watching),
-// layout, saves and root changes pass false. While filtering, update result
-// drawing without changing the hidden folder tree.
+// layout, saves and root changes pass false. While filtering, update the
+// current-file paint mark only in already loaded rows; preserve the hidden tree's
+// nodes, selection and expansion state.
 void Sidebar_SyncToFile(const HPATHL file, bool fileOpened);
 // Re-enumerate the root and restore expanded paths/selection; rerun active filters.
 void Sidebar_Refresh(void);

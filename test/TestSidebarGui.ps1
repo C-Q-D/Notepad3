@@ -5,9 +5,105 @@ param(
     [ValidateSet('All','C','D','E','F','Groups','Toggles','LongPath','ShortPath','OpenFolder','Recent','Create','Filter')][string]$Scenario = 'All',
     [ValidateSet('Light','Dark')][string]$Theme = 'Light',
     [string]$ScreenshotDirectory = '',
-    [string]$Executable = (Join-Path $PSScriptRoot '..\Bin\Release_x64_v143\Notepad3.exe')
+    [string]$Executable = (Join-Path $PSScriptRoot '..\Bin\Release_x64_v143\Notepad3.exe'),
+    [string]$SidebarSource = (Join-Path $PSScriptRoot '..\src\Sidebar.c')
 )
 $ErrorActionPreference = 'Stop'
+
+# Exercise the actual marker synchronization against a native tree. Its private
+# cached handle is paint-only; extraction avoids adding a production test hook or
+# asserting pixels. The loader is forbidden so a marker update cannot do I/O.
+function Test-FilterCurrentMarker([string]$Directory, [string]$Source) {
+    $source = Get-Content -LiteralPath $Source -Raw
+    $parts = foreach ($name in @('_Sidebar_RelativePath', '_Sidebar_GetItem', '_Sidebar_FindPath', 'Sidebar_SyncToFile')) {
+        $match = [regex]::Match($source, '(?ms)^(?:static )?[^\r\n]+ ' + $name + '\([^\r\n]*\)\r?\n\{.*?^}')
+        if (!$match.Success) { throw "Missing production marker function $name" }
+        $match.Value
+    }
+    $harness = @'
+#include <windows.h>
+#include <commctrl.h>
+#include <strsafe.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <wchar.h>
+#define MAX_PATH_EXPLICIT 32768
+#define COUNTOF(value) _countof(value)
+typedef LPCWSTR HPATHL;
+#define Path_Get(path) (path)
+#define Path_IsNotEmpty(path) ((path) && *(path))
+enum { SIDEBAR_FILE = 0, SIDEBAR_UNLOADED = 1, SIDEBAR_LOADED = 2, SIDEBAR_KIND_MASK = 15 };
+static struct { LPCWSTR SidebarFolder; bool ShowSidebar; } Settings = { L"C:\\fixture", true };
+static HWND s_tree, s_panel, s_results;
+static HTREEITEM s_folders, s_currentItem;
+static WCHAR s_query[32] = L"txt";
+static bool s_restoreGroupCollapse;
+static int loads, failures;
+// Loading a directory is an observable failure, even if the final handle matches.
+static bool _Sidebar_LoadChildren(HTREEITEM item) { (void)item; ++loads; return false; }
+'@ + "`n" + ($parts -join "`n") + @'
+
+// Create actual native rows; expected handles do not come from the path walker.
+static HTREEITEM insert(HTREEITEM parent, LPWSTR name, LPARAM kind) {
+    TVINSERTSTRUCTW value = { 0 };
+    value.hParent = parent; value.hInsertAfter = TVI_LAST;
+    value.item.mask = TVIF_TEXT | TVIF_PARAM;
+    value.item.pszText = name; value.item.lParam = kind;
+    return TreeView_InsertItem(s_tree, &value);
+}
+// Report independent marker contracts and return a failing process exit on error.
+static void check(const char* name, bool pass) {
+    printf("%s: Filter marker %s\n", pass ? "PASS" : "FAIL", name);
+    if (!pass) ++failures;
+}
+// Keep the expected handles and native tree state independent of the path walker.
+int main(void) {
+    INITCOMMONCONTROLSEX controls = { sizeof(controls), ICC_TREEVIEW_CLASSES };
+    InitCommonControlsEx(&controls);
+    s_panel = CreateWindowW(L"STATIC", L"", WS_OVERLAPPED, 0, 0, 500, 500, NULL, NULL, NULL, NULL);
+    s_tree = CreateWindowW(WC_TREEVIEWW, L"", WS_CHILD, 0, 0, 400, 400, s_panel, NULL, NULL, NULL);
+    s_results = CreateWindowW(WC_TREEVIEWW, L"", WS_CHILD, 0, 0, 400, 400, s_panel, NULL, NULL, NULL);
+    if (!s_panel || !s_tree || !s_results) { fprintf(stderr, "Native marker fixture failed\n"); return 2; }
+    s_folders = insert(TVI_ROOT, L"Folders", SIDEBAR_LOADED);
+    HTREEITEM start = insert(s_folders, L"start.txt", SIDEBAR_FILE);
+    HTREEITEM closed = insert(s_folders, L"closed", SIDEBAR_UNLOADED);
+    HTREEITEM kept = insert(s_folders, L"kept", SIDEBAR_LOADED);
+    HTREEITEM target = insert(kept, L"target.txt", SIDEBAR_FILE);
+    TreeView_Expand(s_tree, s_folders, TVE_EXPAND);
+    TreeView_Expand(s_tree, kept, TVE_EXPAND);
+    TreeView_SelectItem(s_tree, start);
+    UINT const keptState = TreeView_GetItemState(s_tree, kept, TVIS_EXPANDED);
+    UINT const count = TreeView_GetCount(s_tree);
+    s_currentItem = start;
+    Sidebar_SyncToFile(L"C:\\fixture\\closed\\Inner.txt");
+    check("unloaded result clears old Editing handle", s_currentItem == NULL);
+    s_currentItem = start;
+    Sidebar_SyncToFile(L"c:\\FIXTURE\\kept\\TARGET.txt");
+    check("loaded result moves Editing handle", s_currentItem == target);
+    Sidebar_SyncToFile(L"C:\\outside\\else.txt");
+    check("outside result clears Editing handle", s_currentItem == NULL);
+    check("sync preserves selection, expansion and loaded nodes", loads == 0 && TreeView_GetSelection(s_tree) == start &&
+        TreeView_GetItemState(s_tree, kept, TVIS_EXPANDED) == keptState &&
+        TreeView_GetItemState(s_tree, closed, TVIS_EXPANDED) == 0 && TreeView_GetCount(s_tree) == count);
+    DestroyWindow(s_panel);
+    return failures ? 1 : 0;
+}
+'@
+    $file = Join-Path $Directory 'FilterMarker.c'
+    Set-Content -LiteralPath $file -Value $harness -Encoding utf8
+    $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    $vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    if (!$vs) { throw 'Visual C++ build tools not found' }
+    $env:PATH = (Split-Path -Parent $vswhere) + [IO.Path]::PathSeparator + $env:PATH
+    Import-Module (Join-Path $vs 'Common7\Tools\Microsoft.VisualStudio.DevShell.dll')
+    Enter-VsDevShell -VsInstallPath $vs -SkipAutomaticLocation -DevCmdArguments '-arch=x64 -host_arch=x64' | Out-Null
+    $exe = Join-Path $Directory 'FilterMarker.exe'
+    & cl.exe /nologo /W4 /WX /std:c11 /utf-8 /DUNICODE /D_UNICODE $file "/Fo$Directory\" "/Fe$exe" /link user32.lib comctl32.lib
+    if ($LASTEXITCODE -ne 0) { throw 'Filter marker harness compilation failed' }
+    & $exe
+    return $LASTEXITCODE -ne 0
+}
+
 $temp = Join-Path $env:TEMP ('np3-sidebar-L1-gui-' + [guid]::NewGuid())
 $runner = $null
 $runnerCreated = 0
@@ -15,6 +111,13 @@ $stdoutTask = $null
 $stderrTask = $null
 [void](New-Item -ItemType Directory -Path $temp)
 try {
+    $markerFailed = $false
+    if ($Scenario -in @('All', 'Filter')) {
+        # Stream assertion output separately from the returned failure flag.
+        $markerOutput = @(Test-FilterCurrentMarker $temp $SidebarSource)
+        $markerFailed = [bool]$markerOutput[-1]
+        $markerOutput | Select-Object -SkipLast 1 | Write-Output
+    }
     Copy-Item -LiteralPath $Executable -Destination (Join-Path $temp 'Notepad3.exe')
     # Keep the isolated instance's menu and dialog strings with its built executable.
     $languages = Join-Path (Split-Path -Parent (Resolve-Path -LiteralPath $Executable).Path) 'lng'
@@ -56,6 +159,7 @@ PreferredLanguageLocaleName=en-US
     $stderrTask = $runner.StandardError.ReadToEndAsync()
     if (!$runner.WaitForExit(120000)) { throw 'Sidebar GUI runner timed out after 120 seconds' }
     if ($runner.ExitCode -ne 0) { throw "Sidebar GUI assertions failed (exit $($runner.ExitCode))" }
+    if ($markerFailed) { throw 'Filter current-file marker assertions failed' }
 } finally {
     # Verify the PID, creation FILETIME and unique executable path before cleanup.
     $pidFile = Join-Path $temp 'pids.txt'

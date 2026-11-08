@@ -33,6 +33,7 @@ static void _Sidebar_SetHint(LPCWSTR text);
 static void _Sidebar_ActivateResult(HTREEITEM item);
 static void _Sidebar_FirstResultKey(bool open);
 static void _Sidebar_LayoutChildren(void);
+static void _Sidebar_FailScan(DWORD error);
 static HTREEITEM s_recent = NULL, s_folders = NULL, s_currentItem = NULL, s_hotItem = NULL, s_pressedItem = NULL;
 static HTREEITEM s_recentCurrentItem = NULL;
 static int s_recentCount = 0;
@@ -40,7 +41,8 @@ static UINT s_rootDirectories = 0, s_rootFiles = 0;
 static bool s_restoreGroupCollapse = false;
 static WCHAR s_query[MAX_PATH_EXPLICIT];
 enum { SIDEBAR_FILTER_DELAY = 200, SIDEBAR_SCAN_LIMIT = 20000, SIDEBAR_RESULT_LIMIT = 200,
-       SIDEBAR_SCAN_BATCH = 64, SIDEBAR_SCAN_BUDGET_MS = 6, SIDEBAR_FILTER_TIMER = 1, SIDEBAR_SCAN_TIMER = 2 };
+       SIDEBAR_SCAN_BATCH = 64, SIDEBAR_SCAN_BUDGET_MS = 6, SIDEBAR_FILTER_TIMER = 1, SIDEBAR_SCAN_TIMER = 2,
+       SIDEBAR_RESUME_TIMER = 3 };
 // A depth-first scan owns its directory handles and paths on the UI thread.
 // Timer slices release control between batches; replacing the query closes all
 // frames before starting again. Results own at most 200 independent paths.
@@ -54,6 +56,7 @@ static HPATHL s_resultPaths[SIDEBAR_RESULT_LIMIT];
 static UINT s_resultCount = 0, s_scanned = 0;
 static ULONGLONG s_filterDue = 0;
 static int s_filterAction = 0;
+static bool s_filterRestart = false;
 static HTREEITEM s_resultHot = NULL, s_resultPressed = NULL;
 
 // Opaque colors include the specified alpha blended against each local surface.
@@ -722,19 +725,61 @@ static inline bool _Sidebar_AbbreviateFolder(LPCWSTR root, LPCWSTR folder, LPWST
     return true;
 }
 
-// Cancel a scan and close every active enumerator. Result paths remain owned by
-// the result view until _Sidebar_FilterChanged deletes its rows and frees them.
+// Cancel all search timers and close every active enumerator. Result paths stay
+// owned until _Sidebar_ClearResults deletes the rows and releases their storage.
 static void _Sidebar_StopScan(void)
 {
     KillTimer(s_panel, SIDEBAR_FILTER_TIMER);
     KillTimer(s_panel, SIDEBAR_SCAN_TIMER);
+    KillTimer(s_panel, SIDEBAR_RESUME_TIMER);
     s_filterDue = 0;
+    s_filterRestart = false;
     while (s_scan) {
         SidebarScan* parent = s_scan->parent;
         if (s_scan->search != INVALID_HANDLE_VALUE) { FindClose(s_scan->search); }
         Path_Release(s_scan->folder);
         FreeMem(s_scan);
         s_scan = parent;
+    }
+}
+
+// Rows never outlive their owned paths. Cancellation also discards partial scans
+// that have not been published, so hiding/closing cannot retain unfinished data.
+static void _Sidebar_ClearResults(void)
+{
+    TreeView_DeleteAllItems(s_results);
+    s_resultHot = s_resultPressed = NULL;
+    for (UINT i = 0; i < s_resultCount; ++i) { Path_Release(s_resultPaths[i]); }
+    s_resultCount = s_scanned = 0;
+}
+
+// Modal loops dispatch timers too. Navigation and scan work must wait until the
+// visible sidebar's owner is available and the EDIT still holds this query.
+static bool _Sidebar_CanInteract(void)
+{
+    if (!Settings.ShowSidebar || !IsWindowVisible(s_panel) || !IsWindowEnabled(Globals.hwndMain)) { return false; }
+    HWND const popup = GetLastActivePopup(Globals.hwndMain);
+    // A modeless Find window may remain visible after focus returns to main.
+    if (popup != Globals.hwndMain && IsWindowVisible(popup) && GetActiveWindow() != Globals.hwndMain) { return false; }
+    WCHAR query[COUNTOF(s_query)];
+    GetWindowTextW(s_filter, query, COUNTOF(query));
+    return s_query[0] && wcscmp(query, s_query) == 0;
+}
+
+void Sidebar_CancelPending(void)
+{
+    if (!s_panel) { return; }
+    bool const unfinished = s_filterDue || s_scan || s_filterRestart;
+    s_filterAction = 0;
+    _Sidebar_StopScan();
+    if (unfinished) {
+        _Sidebar_ClearResults();
+        // Close can be cancelled. Retry only the query once its owner is enabled
+        // again; the old Enter/Down action is deliberately never retained.
+        if (Settings.ShowSidebar && IsWindowVisible(s_panel) && s_query[0]) {
+            s_filterRestart = true;
+            if (!SetTimer(s_panel, SIDEBAR_RESUME_TIMER, SIDEBAR_FILTER_DELAY, NULL)) { _Sidebar_FailScan(GetLastError()); }
+        }
     }
 }
 
@@ -779,7 +824,7 @@ static void _Sidebar_PublishResults(void)
     if (s_filterAction) {
         bool const open = s_filterAction == 2;
         s_filterAction = 0;
-        _Sidebar_FirstResultKey(open);
+        if (_Sidebar_CanInteract() && GetFocus() == s_filter) { _Sidebar_FirstResultKey(open); }
     }
 }
 
@@ -817,14 +862,11 @@ static void _Sidebar_FilterChanged(void)
     _Sidebar_StopScan();
     s_filterAction = 0;
     _Sidebar_SetHint(NULL);
-    TreeView_DeleteAllItems(s_results);
-    s_resultHot = s_resultPressed = NULL;
-    for (UINT i = 0; i < s_resultCount; ++i) { Path_Release(s_resultPaths[i]); }
-    s_resultCount = s_scanned = 0;
+    _Sidebar_ClearResults();
     GetWindowTextW(s_filter, s_query, COUNTOF(s_query));
     ShowWindow(s_tree, s_query[0] ? SW_HIDE : SW_SHOWNA);
     ShowWindow(s_results, s_query[0] ? SW_SHOWNA : SW_HIDE);
-    if (s_query[0]) {
+    if (s_query[0] && Settings.ShowSidebar && IsWindowVisible(s_panel)) {
         s_filterDue = GetTickCount64() + SIDEBAR_FILTER_DELAY;
         if (!SetTimer(s_panel, SIDEBAR_FILTER_TIMER, SIDEBAR_FILTER_DELAY, NULL)) { _Sidebar_FailScan(GetLastError()); }
     }
@@ -891,9 +933,10 @@ static void _Sidebar_ScanBatch(void)
     }
 }
 
-// Resolve a path below the current root, expanding ancestors only as needed.
+// Resolve a path below the current root. reveal=false only visits loaded rows,
+// without loading, expanding or refreshing; filtering uses it for the paint mark.
 // When refreshMissing is true, retry a missing child once in its loaded parent.
-static HTREEITEM _Sidebar_FindPath(const HPATHL path, bool refreshMissing)
+static HTREEITEM _Sidebar_FindPath(const HPATHL path, bool refreshMissing, bool reveal)
 {
     HTREEITEM parent = s_folders;
     LPCWSTR part = _Sidebar_RelativePath(Path_Get(Settings.SidebarFolder), Path_Get(path));
@@ -914,10 +957,10 @@ static HTREEITEM _Sidebar_FindPath(const HPATHL path, bool refreshMissing)
             (kind != SIDEBAR_UNLOADED && kind != SIDEBAR_LOADED)) {
             return NULL;
         }
-        if (kind == SIDEBAR_UNLOADED && !_Sidebar_LoadChildren(parent)) {
+        if (kind == SIDEBAR_UNLOADED && (!reveal || !_Sidebar_LoadChildren(parent))) {
             return NULL;
         }
-        TreeView_Expand(s_tree, parent, TVE_EXPAND);
+        if (reveal) { TreeView_Expand(s_tree, parent, TVE_EXPAND); }
         HTREEITEM match = NULL;
         for (int attempt = 0; attempt < (refreshMissing ? 2 : 1); ++attempt) {
             for (HTREEITEM child = TreeView_GetChild(s_tree, parent); child; child = TreeView_GetNextSibling(s_tree, child)) {
@@ -930,7 +973,7 @@ static HTREEITEM _Sidebar_FindPath(const HPATHL path, bool refreshMissing)
                     break;
                 }
             }
-            if (match || !refreshMissing || attempt || !_Sidebar_LoadChildren(parent)) {
+            if (match || !reveal || !refreshMissing || attempt || !_Sidebar_LoadChildren(parent)) {
                 break;
             }
         }
@@ -1094,7 +1137,10 @@ void Sidebar_SyncToFile(const HPATHL file, bool fileOpened)
     _Sidebar_RefreshRecent();
     if (s_query[0]) {
         // FileLoad synchronizes here too. Searching/opening a result must leave
-        // the hidden folder tree intact, even when the file was never expanded.
+        // selection/expansion intact. Clear the old paint mark when the new file
+        // is not loaded, rather than revealing its ancestors to find a row.
+        s_currentItem = s_tree && Path_IsNotEmpty(file) ? _Sidebar_FindPath(file, false, false) : NULL;
+        InvalidateRect(s_tree, NULL, FALSE);
         InvalidateRect(s_results, NULL, FALSE);
         return;
     }
@@ -1104,7 +1150,7 @@ void Sidebar_SyncToFile(const HPATHL file, bool fileOpened)
     // Startup's first sync must not undo the persisted group collapse. A later
     // file activation still expands its ancestors through the normal path.
     if (s_restoreGroupCollapse) { s_restoreGroupCollapse = false; return; }
-    HTREEITEM const item = Path_IsNotEmpty(file) ? _Sidebar_FindPath(file, true) : NULL;
+    HTREEITEM const item = Path_IsNotEmpty(file) ? _Sidebar_FindPath(file, true, true) : NULL;
     s_currentItem = item;
     TreeView_SelectItem(s_tree, item);
     if (item) {
@@ -1158,7 +1204,7 @@ void Sidebar_Refresh(void)
     Sidebar_SetRoot(Settings.SidebarFolder);
     while (expanded) {
         SidebarExpanded* next = expanded->next;
-        HTREEITEM const found = _Sidebar_FindPath(expanded->path, false);
+        HTREEITEM const found = _Sidebar_FindPath(expanded->path, false, true);
         if (found) { TreeView_Expand(s_tree, found, TVE_EXPAND); }
         Path_Release(expanded->path);
         FreeMem(expanded);
@@ -1167,7 +1213,7 @@ void Sidebar_Refresh(void)
     s_restoreGroupCollapse = false;
     // Child enumeration already restores the current-file handle where visible;
     // looking up that file here would reopen an intentionally collapsed parent.
-    TreeView_SelectItem(s_tree, recentSelected ? s_recent : (Path_IsNotEmpty(selected) ? _Sidebar_FindPath(selected, false) : NULL));
+    TreeView_SelectItem(s_tree, recentSelected ? s_recent : (Path_IsNotEmpty(selected) ? _Sidebar_FindPath(selected, false, true) : NULL));
     if (!rootExpanded) {
         _Sidebar_CollapseDirectory(s_folders);
     }
@@ -1429,6 +1475,7 @@ static HTREEITEM _Sidebar_RowAt(HWND tree, POINT point)
 // remain selected and never reach FileLoad, for both mouse and keyboard callers.
 static void _Sidebar_ActivateResult(HTREEITEM item)
 {
+    if (!_Sidebar_CanInteract()) { return; }
     TVITEMW row = { 0 };
     row.mask = TVIF_PARAM;
     row.hItem = item;
@@ -1449,7 +1496,7 @@ static void _Sidebar_ActivateResult(HTREEITEM item)
 // Enter must open the new query's first result, never a row from an older query.
 static void _Sidebar_FirstResultKey(bool open)
 {
-    if (!s_query[0]) { return; }
+    if (!_Sidebar_CanInteract()) { return; }
     if (s_filterDue || s_scan) { s_filterAction = open ? 2 : 1; return; }
     HTREEITEM const header = TreeView_GetRoot(s_results);
     HTREEITEM const first = header ? TreeView_GetNextSibling(s_results, header) : NULL;
@@ -2063,6 +2110,14 @@ static LRESULT CALLBACK _Sidebar_PanelProc(HWND hwnd, UINT message, WPARAM wPara
     _Sidebar_ClearHintForInput(message);
     switch (message) {
     case WM_TIMER:
+        if (wParam == SIDEBAR_RESUME_TIMER) {
+            if (!Settings.ShowSidebar || !IsWindowVisible(hwnd)) { KillTimer(hwnd, SIDEBAR_RESUME_TIMER); }
+            else if (_Sidebar_CanInteract()) { _Sidebar_FilterChanged(); }
+            return 0;
+        }
+        // Pause recursive I/O during any modal loop and discard queued navigation
+        // immediately, rather than executing it when that loop eventually ends.
+        if (!_Sidebar_CanInteract()) { s_filterAction = 0; return 0; }
         if (wParam == SIDEBAR_FILTER_TIMER) {
             // A queued old timer message must not bypass a new 200ms debounce.
             if (!s_filterDue || GetTickCount64() < s_filterDue || !s_query[0]) { return 0; }
@@ -2174,8 +2229,8 @@ static LRESULT CALLBACK _Sidebar_PanelProc(HWND hwnd, UINT message, WPARAM wPara
         break;
     case WM_DESTROY:
         _Sidebar_StopScan();
-        for (UINT i = 0; i < s_resultCount; ++i) { Path_Release(s_resultPaths[i]); }
-        s_resultCount = 0;
+        s_filterAction = 0;
+        _Sidebar_ClearResults();
         break;
     case WM_NCDESTROY:
         s_panel = s_filter = s_tooltip = NULL;
@@ -2287,9 +2342,12 @@ bool Sidebar_PreTranslateMessage(MSG* message)
     if (message->hwnd == s_filter && message->message >= WM_KEYFIRST && message->message <= WM_KEYLAST &&
         GetKeyState(VK_MENU) >= 0) {
         bool const control = GetKeyState(VK_CONTROL) < 0;
-        bool const editing = message->wParam == 'A' || message->wParam == 'C' || message->wParam == 'V' ||
+        bool const shift = GetKeyState(VK_SHIFT) < 0;
+        // Ctrl+Shift+arrows/Home/End extend word/line selections in EDIT. Other
+        // Ctrl+Shift commands (recode, braces, paste variants) belong to main.
+        bool const editing = (!shift && (message->wParam == 'A' || message->wParam == 'C' || message->wParam == 'V' ||
                              message->wParam == 'X' || message->wParam == 'Z' || message->wParam == VK_INSERT ||
-                             message->wParam == VK_DELETE || message->wParam == VK_BACK ||
+                             message->wParam == VK_DELETE || message->wParam == VK_BACK)) ||
                              message->wParam == VK_LEFT || message->wParam == VK_RIGHT ||
                              message->wParam == VK_HOME || message->wParam == VK_END;
         if (!control || message->message == WM_CHAR || editing) {
@@ -2301,7 +2359,7 @@ bool Sidebar_PreTranslateMessage(MSG* message)
                     SendMessage(s_filter, EM_SETSEL, 0, -1);
                     return true;
                 }
-                if (!control) {
+                if (!control && !shift) {
                     switch (message->wParam) {
                     case VK_ESCAPE:
                         if (s_query[0]) { SetWindowTextW(s_filter, L""); }
@@ -2323,7 +2381,7 @@ bool Sidebar_PreTranslateMessage(MSG* message)
         }
     }
     if (message->hwnd == s_results && message->message >= WM_KEYFIRST && message->message <= WM_KEYLAST &&
-        GetKeyState(VK_CONTROL) >= 0 && GetKeyState(VK_MENU) >= 0) {
+        GetKeyState(VK_CONTROL) >= 0 && GetKeyState(VK_MENU) >= 0 && GetKeyState(VK_SHIFT) >= 0) {
         if (message->message == WM_KEYDOWN) {
             _Sidebar_SetHint(NULL);
             switch (message->wParam) {
@@ -2346,7 +2404,7 @@ bool Sidebar_PreTranslateMessage(MSG* message)
         return true;
     }
     if (!s_tree || message->hwnd != s_tree || message->message < WM_KEYFIRST ||
-        message->message > WM_KEYLAST || GetKeyState(VK_CONTROL) < 0 || GetKeyState(VK_MENU) < 0) {
+        message->message > WM_KEYLAST || GetKeyState(VK_CONTROL) < 0 || GetKeyState(VK_MENU) < 0 || GetKeyState(VK_SHIFT) < 0) {
         return false;
     }
     if (message->message == WM_KEYDOWN) {
@@ -2378,6 +2436,7 @@ void Sidebar_Show(bool visible)
     if (!s_tree) {
         return;
     }
+    bool const wasVisible = IsWindowVisible(s_panel) != FALSE;
     if (!visible && (IsChild(s_panel, GetFocus()) || GetFocus() == s_panel || GetFocus() == s_splitter)) {
         SetFocus(Globals.hwndEdit);
     }
@@ -2389,6 +2448,8 @@ void Sidebar_Show(bool visible)
     }
     ShowWindow(s_panel, visible ? SW_SHOWNA : SW_HIDE);
     ShowWindow(s_splitter, visible ? SW_SHOWNA : SW_HIDE);
+    if (!visible) { Sidebar_CancelPending(); }
+    else if (!wasVisible && s_query[0]) { _Sidebar_FilterChanged(); }
 }
 
 void Sidebar_Layout(RECT* available)

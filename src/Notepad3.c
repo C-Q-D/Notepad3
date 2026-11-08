@@ -2559,6 +2559,9 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT umsg, WPARAM wParam, LPARAM lParam)
         break;
 
     case WM_CLOSE:
+        // FileSave can run a modal message loop before WM_DESTROY stops timers.
+        // Cancel sidebar navigation first so that loop cannot save/load a result.
+        Sidebar_CancelPending();
         SetEvent(s_hEventAppIsClosing);
         InstallFileWatching(false);
         if (IsIconic(hwnd)) {

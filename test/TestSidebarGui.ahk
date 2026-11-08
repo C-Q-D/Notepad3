@@ -976,6 +976,8 @@ RunFilterScenario() {
     FilterClickClear(panel, filter)
     FilterWait(() => ControlGetText(filter) = '' && DllCall('IsWindowVisible', 'ptr', tree) && !DllCall('IsWindowVisible', 'ptr', results), 'capsule clear button restores folder tree')
     FilterAssert(FilterFolderState(tree) = before, 'clear preserves expanded and collapsed folders')
+    if screenshotDirectory != '' && results != tree
+        CaptureWindow(main, screenshotDirectory '\filter-' StrLower(themeName) '-cleared-marker.png')
 
     ControlSetText('zz-unfindable', filter)
     FilterWait(() => FilterFind(results, '[Clear filter]') != 0, 'no-match state includes clear action')
@@ -1014,6 +1016,15 @@ RunFilterScenario() {
     SendMessage(0xB1, 8, 8, filter)
     FilterCtrlKey(filter, 0x41)
     FilterWait(() => SendMessage(0xB0, 0, 0, filter) = 0x00080000 && SendMessage(2143, 0, 0, editor) = 1 && SendMessage(2145, 0, 0, editor) = 1, 'Ctrl+A selects filter text and leaves editor selection unchanged')
+    braces := FilterMenuChecked(41011)
+    FilterCtrlKey(filter, 0x56, true)
+    FilterWait(() => FilterMenuChecked(41011) != braces, 'Ctrl+Shift+V executes main Match Braces command')
+    ; Restore the user's command state inside this isolated instance.
+    PostMessage(0x111, 41011, 0, , main)
+    topmost := (WinGetExStyle(main) & 8) != 0
+    FilterCtrlKey(filter, 0x54, false, true)
+    FilterWait(() => ((WinGetExStyle(main) & 8) != 0) != topmost, 'Alt+T executes main Always On Top command')
+    PostMessage(0x111, 42018, 0, , main)
     ControlSetText('start', filter)
     FilterWait(() => FilterFind(results, 'start.txt') != 0, 'changed query replaces old results')
     ControlFocus(filter)
@@ -1091,6 +1102,7 @@ RunFilterScenario() {
         FileAppend('', testDir '\filter-limits\bulk\result-hit-' Format('{:05}', A_Index) '.txt')
     tree := StartSidebarScenario(testDir '\filter-limits', 1, folder '\start.txt')
     panel := DllCall('GetParent', 'ptr', tree, 'ptr')
+    editor := ControlGetHwnd('Scintilla1', main)
     filter := ControlGetHwnd('Edit1', panel)
     results := tree
     try results := ControlGetHwnd('SysTreeView322', main)
@@ -1100,8 +1112,18 @@ RunFilterScenario() {
         CaptureWindow(main, screenshotDirectory '\filter-' StrLower(themeName) '-result-limit.png')
     Loop 20001
         FileAppend('', testDir '\filter-limits\bulk\scan-item-' Format('{:05}', A_Index) '.dat')
-    ControlSetText('no-scan-file-matches', filter)
-    FilterWait(() => FilterFind(results, '[Clear filter]') != 0, 'large recursive scan completes with an actionable empty state', 15000)
+    ; FindFirstFile is also the production enumerator. Select its actual final
+    ; file rather than assuming creation order or an NTFS alphabetical guarantee.
+    ; The fixture is flat below bulk: 20202 files plus the parent directory.
+    lastFile := '', fileCount := 0
+    Loop Files testDir '\filter-limits\bulk\*', 'F' {
+        lastFile := A_LoopFileName
+        fileCount += 1
+    }
+    if fileCount != 20202 || lastFile = ''
+        throw Error('Scan-cap fixture does not place the sentinel beyond 20000 entries')
+    ControlSetText(lastFile, filter)
+    FilterWait(() => FilterFind(results, '[Clear filter]') != 0 && FilterFind(results, lastFile) = 0, 'scan cap excludes matching final enumerated file', 15000)
     if screenshotDirectory != '' && results != tree
         CaptureWindow(main, screenshotDirectory '\filter-' StrLower(themeName) '-scan-limit.png')
     ControlSetText('no-scan-file-matches', filter)
@@ -1111,6 +1133,50 @@ RunFilterScenario() {
     FilterWait(() => ControlGetText(filter) = '' && DllCall('IsWindowVisible', 'ptr', tree), 'Escape cancels in-progress large scan', 1200)
     ControlSetText('result-hit-00001', filter)
     FilterWait(() => FilterFind(results, 'result-hit-00001.txt') != 0 && TreeText(results, SendMessage(0x110A, 0, 0, results)) = '# Matched 1 files', 'replacement search excludes cancelled scan completion', 15000)
+
+    ControlSetText('result-hit-00002', filter)
+    Sleep(350)
+    ControlFocus(filter)
+    TreeKey(filter, 0x0D)
+    PostMessage(0x111, 41066, 0, , main)
+    WaitUntil(() => !DllCall('IsWindowVisible', 'ptr', panel), 'Filter hide command completes')
+    Sleep(6500)
+    FilterAssert(EditorText(editor) = 'initial filter document' && ControlGetFocus(main) = editor && SendMessage(0x1105, 0, 0, results) = 0, 'hide cancels pending Enter without opening or stealing focus')
+    PostMessage(0x111, 41066, 0, , main)
+    FilterWait(() => FilterFind(results, 'result-hit-00002.txt') != 0 && ControlGetText(filter) = 'result-hit-00002', 'show restarts retained query without delayed navigation', 15000)
+    FilterAssert(EditorText(editor) = 'initial filter document' && ControlGetFocus(main) != results, 'resumed query cannot resurrect cancelled Enter')
+
+    ; A different modal owner must discard pending navigation as well. Keep it
+    ; open long enough that an unguarded scan would have completed underneath it.
+    ControlSetText('result-hit-00003', filter)
+    Sleep(350)
+    ControlFocus(filter)
+    TreeKey(filter, 0x28)
+    dialog := OpenSidebarFolderDialog()
+    Sleep(6500)
+    FilterAssert(EditorText(editor) = 'initial filter document' && SendMessage(0x1105, 0, 0, results) = 0, 'modal folder picker pauses scan and cancels pending Down')
+    PostMessage(0x111, 2, 0, , dialog)
+    Check(WinWaitClose(dialog, , 3), 'Filter pending-navigation picker Cancel closes')
+    FilterWait(() => FilterFind(results, 'result-hit-00003.txt') != 0, 'scan resumes after modal picker closes', 15000)
+    FilterAssert(ControlGetFocus(main) != results, 'modal completion cannot resurrect pending Down')
+
+    TypeText(editor, 'unsaved-close')
+    unsaved := EditorText(editor)
+    disk := FileRead(folder '\start.txt', 'UTF-8')
+    ControlSetText('result-hit-00004', filter)
+    Sleep(350)
+    ControlFocus(filter)
+    TreeKey(filter, 0x0D)
+    PostMessage(0x10, 0, 0, , main)
+    dialog := WinWait('ahk_class #32770 ahk_pid ' testPid, , 3)
+    Check(dialog != 0, 'Filter close starts save confirmation')
+    Sleep(6500)
+    FilterAssert(EditorText(editor) = unsaved && FileRead(folder '\start.txt', 'UTF-8') = disk && WinExist('ahk_id ' dialog) && SendMessage(0x1105, 0, 0, results) = 0, 'close confirmation cancels scan before any save or delayed open')
+    PostMessage(0x111, 2, 0, , dialog)
+    Check(WinWaitClose(dialog, , 3), 'Filter close Cancel keeps test instance open')
+    FilterWait(() => FilterFind(results, 'result-hit-00004.txt') != 0, 'cancelled close restarts query without navigation', 15000)
+    FilterAssert(EditorText(editor) = unsaved && FileRead(folder '\start.txt', 'UTF-8') = disk, 'cancelled close preserves unsaved document and disk file')
+    SendMessage(2014, 0, 0, editor)
     FinishSidebarScenario('Filter limits')
     if filterFailures
         throw Error('Filter contract failures: ' filterFailures)
@@ -1312,8 +1378,9 @@ FilterClickClear(panel, filter) {
 
 ; Share only the isolated test window's input queue while posting a modifier key.
 ; SetKeyboardState changes this attached pair, never the user's desktop keyboard.
-; Hold Ctrl for the queued key transition, then restore and detach in all cases.
-FilterCtrlKey(control, key) {
+; Hold the full modifier combination through the queued transition, then restore
+; and detach. Existing calls retain their Ctrl-only meaning; Alt uses WM_SYSKEY.
+FilterCtrlKey(control, key, shift := false, alt := false) {
     ownThread := DllCall('GetCurrentThreadId', 'uint')
     targetThread := DllCall('GetWindowThreadProcessId', 'ptr', control, 'ptr', 0, 'uint')
     if !DllCall('AttachThreadInput', 'uint', ownThread, 'uint', targetThread, 'int', true)
@@ -1322,15 +1389,31 @@ FilterCtrlKey(control, key) {
     try {
         DllCall('GetKeyboardState', 'ptr', previous)
         DllCall('RtlMoveMemory', 'ptr', pressed, 'ptr', previous, 'uptr', 256)
-        NumPut('uchar', 0x80, pressed, 0x11)
-        NumPut('uchar', 0x80, pressed, 0xA2)
+        for vk in [0x11, 0xA2]
+            NumPut('uchar', alt ? 0 : 0x80, pressed, vk)
+        for vk in [0x10, 0xA0]
+            NumPut('uchar', shift ? 0x80 : 0, pressed, vk)
+        for vk in [0x12, 0xA4]
+            NumPut('uchar', alt ? 0x80 : 0, pressed, vk)
         DllCall('SetKeyboardState', 'ptr', pressed)
-        TreeKey(control, key)
+        if alt {
+            PostMessage(0x104, key, 0x20000001, control)
+            PostMessage(0x105, key, 0xE0000001, control)
+        } else
+            TreeKey(control, key)
         Sleep(150)
     } finally {
         DllCall('SetKeyboardState', 'ptr', previous)
         DllCall('AttachThreadInput', 'uint', ownThread, 'uint', targetThread, 'int', false)
     }
+}
+
+; Refresh main-menu checkmarks before reading a real command's checked state.
+FilterMenuChecked(command) {
+    global main
+    menu := DllCall('GetMenu', 'ptr', main, 'ptr')
+    SendMessage(0x116, menu, 0, , main)
+    return (DllCall('GetMenuState', 'ptr', menu, 'uint', command, 'uint', 0, 'uint') & 8) != 0
 }
 
 ; After recording a failed binary assertion, cancel only the test instance's
