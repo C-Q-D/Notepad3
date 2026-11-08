@@ -12339,6 +12339,8 @@ bool FileLoad(const HPATHL hfile_pth, const FileLoadFlags fLoadFlags, const DocP
     Path_NormalizeEx(hopen_file, Paths.WorkingDirectory, true, Flags.bSearchPathIfRelative);
 
     if (!bReloadFile && Path_StrgComparePath(hopen_file, Paths.CurrentFile, Paths.WorkingDirectory, true) == 0) {
+        // Explicit same-file activation restores a sidebar hide without reloading.
+        Sidebar_SyncToFile(Paths.CurrentFile, true);
         Path_Release(hopen_file);
         return false;
     }
@@ -12579,7 +12581,7 @@ bool FileLoad(const HPATHL hfile_pth, const FileLoadFlags fLoadFlags, const DocP
     UpdateToolbar_Now(Globals.hwndMain);
 
     if (fSuccess) {
-        Sidebar_SyncToFile(Paths.CurrentFile, true);
+        Sidebar_SyncToFile(Paths.CurrentFile, !bReloadFile);
     }
     return fSuccess;
 }

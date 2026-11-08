@@ -637,8 +637,139 @@ RunRecentScenario() {
     RecentAssert(StrSplit(hidden, '|').Length = 32 && InStr(hidden, testDir '\fixture\b10.txt')
         && InStr(hidden, testDir '\fixture\old-28.txt') && !InStr(hidden, testDir '\fixture\old-29.txt'),
         'Recent hide list keeps at most 32 whole paths and evicts oldest')
+    RunRecentReworkScenarios()
     if recentFailures
         throw Error('Recent independent assertions failed: ' recentFailures)
+}
+
+; Exercise full MRU paths and real FileLoad entry points that short sidebar-only
+; fixtures miss. Each case uses its own INI and observes controls plus saved data.
+RunRecentReworkScenarios() {
+    global testDir, main, testPid
+    ini := testDir '\Notepad3.ini'
+    longDir := testDir '\recent-long'
+    segment := 'segment-'
+    Loop 72
+        segment .= 'x'
+    Loop 3
+        longDir .= '\' segment
+    longFile := longDir '\recent-long.txt'
+    DirCreate('\\?\' longDir)
+    FileAppend('recent-long document', '\\?\' longFile, 'UTF-8')
+    Check(StrLen(longFile) > 260, 'Recent long fixture crosses 260 UTF-16 characters')
+    WriteRecentReworkIni(longFile)
+    tree := ResumeRecentScenario(testDir '\fixture\a.txt')
+    recent := SendMessage(0x110A, 0, 0, tree)
+    item := SendMessage(0x110A, 1, SendMessage(0x110A, 4, recent, tree), tree)
+    ClickTree(tree, item)
+    RecentWait(() => InStr(WinGetTitle(main), 'recent-long.txt'), 'Recent long path click opens complete file')
+    DismissRecentLoadError()
+    ; Return to the short file so Enter must perform a different-file load too.
+    if InStr(WinGetTitle(main), 'recent-long.txt') {
+        ClickTree(tree, TreeFind(tree, testDir '\fixture\a.txt', recent))
+        WaitUntil(() => InStr(WinGetTitle(main), 'a.txt'), 'Recent Enter fixture returns to short file')
+    }
+    item := SendMessage(0x110A, 1, SendMessage(0x110A, 4, recent, tree), tree)
+    SendMessage(0x110B, 9, item, tree)
+    ControlFocus(tree)
+    TreeKey(tree, 0x0D)
+    RecentWait(() => InStr(WinGetTitle(main), 'recent-long.txt'), 'Recent long path Enter activates complete file')
+    DismissRecentLoadError()
+    ClickTree(tree, recent, true)
+    RecentWait(() => RecentNames(tree) = 'Opened files will appear here', 'Recent long path clear hides complete MRU entry')
+    FinishSidebarScenario('Recent long cleared')
+    RecentAssert(InStr(ReadSetting(ini, 'SidebarRecentHidden', ''), longFile), 'Recent long path persists without truncation in hidden INI')
+    tree := ResumeRecentScenario()
+    RecentAssert(RecentNames(tree) = 'Opened files will appear here', 'Recent long path remains hidden after restart')
+    FinishSidebarScenario('Recent long restart')
+
+    file := testDir '\fixture\reload.txt'
+    FileAppend('before automatic reload', file, 'UTF-8')
+    WriteRecentReworkIni(file, 3, testDir '\fixture\a.txt')
+    tree := ResumeRecentScenario(file)
+    editor := ControlGetHwnd('Scintilla1', main)
+    ClickTree(tree, SendMessage(0x110A, 0, 0, tree), true)
+    WaitUntil(() => RecentNames(tree) = 'Opened files will appear here', 'Recent reload fixture starts hidden')
+    document := FileOpen(file, 'w', 'UTF-8')
+    document.Write('after automatic reload')
+    document.Close()
+    WaitUntil(() => InStr(EditorText(editor), 'after automatic reload'), 'Recent actual file watcher reloads changed contents', 10000)
+    ; Editor replacement precedes the final sidebar sync. Native delete/insert
+    ; notifications permit an empty snapshot while rebuilding, but no filename
+    ; may reappear and the final state must contain the explanatory empty row.
+    staysHidden := true
+    start := A_TickCount
+    while A_TickCount - start < 1000 {
+        names := RecentNames(tree)
+        if names != '' && names != 'Opened files will appear here' {
+            staysHidden := false
+            break
+        }
+        Sleep(25)
+    }
+    RecentAssert(staysHidden && RecentNames(tree) = 'Opened files will appear here', 'Recent automatic reload preserves sidebar hiding')
+    FinishSidebarScenario('Recent auto reload')
+    RecentAssert(InStr(ReadSetting(ini, 'SidebarRecentHidden', ''), file), 'Recent automatic reload keeps persisted hidden path')
+
+    ; Both menus converge on FileLoad's same-file early return. Change the disk
+    ; contents with watching disabled to prove activation does not reload text.
+    file := testDir '\fixture\same-current.txt'
+    FileAppend('same-current editor contents', file, 'UTF-8')
+    WriteRecentReworkIni(file)
+    tree := ResumeRecentScenario(file)
+    editor := ControlGetHwnd('Scintilla1', main)
+    document := FileOpen(file, 'w', 'UTF-8')
+    document.Write('same-current disk contents')
+    document.Close()
+    for command in [40001, 40024] {
+        label := command = 40001 ? 'Open menu' : 'Recent menu'
+        ClickTree(tree, SendMessage(0x110A, 0, 0, tree), true)
+        WaitUntil(() => RecentNames(tree) = 'Opened files will appear here', 'Recent ' label ' fixture starts hidden')
+        PostMessage(0x111, command, 0, , main)
+        dialog := WinWait('ahk_class #32770 ahk_pid ' testPid, , 5)
+        Check(dialog != 0, 'Recent ' label ' opens its real dialog')
+        if command = 40001 {
+            ControlSetText(file, 'Edit1', dialog)
+        } else {
+            list := ControlGetHwnd('SysListView321', dialog)
+            ControlFocus(list)
+            ControlSend('{Home}', list)
+        }
+        PostMessage(0x111, 1, 0, , dialog)
+        Check(WinWaitClose(dialog, , 5), 'Recent ' label ' accepts selected current file')
+        RecentWait(() => RecentNames(tree) = 'same-current.txt', 'Recent ' label ' unhides explicit same-file activation')
+        RecentAssert(InStr(EditorText(editor), 'same-current editor contents'), 'Recent ' label ' retains existing document without reload')
+    }
+    FinishSidebarScenario('Recent same file menus')
+    RecentAssert(!InStr(ReadSetting(ini, 'SidebarRecentHidden', ''), file), 'Recent same-file menu activation persists removal of hidden path')
+}
+
+; Replace only this isolated fixture's settings. A no-watch default keeps menu
+; activation distinct from reloading; the watcher case opts into auto reload.
+WriteRecentReworkIni(file, watching := 0, second := '') {
+    global testDir, themeName
+    ini := testDir '\Notepad3.ini'
+    FileDelete(ini)
+    FileAppend('[Settings]`r`nSettingsVersion=5`r`nSaveSettings=1`r`nSaveRecentFiles=1`r`n'
+        'ShowSidebar=1`r`nSidebarWidth=300`r`nSidebarFolder=' testDir '\fixture`r`n'
+        'ReuseWindow=0`r`nSingleFileInstance=0`r`nAutoLoadMRUFile=0`r`nFileWatchingMode=' watching '`r`n'
+        'WinThemeDarkMode=' (themeName = 'Dark' ? 1 : 2) '`r`n'
+        '[Settings2]`r`nPreferredLanguageLocaleName=en-US`r`nFileCheckInterval=100`r`n'
+        '[Recent Files]`r`n01="' file '"`r`n'
+        (second != '' ? '02="' second '"`r`n' : ''), ini, 'UTF-8')
+}
+
+; An unfixed long-path open can show the existing missing-file error. Dismiss
+; only this fixture's dialog after recording failure, so other cases still run.
+DismissRecentLoadError() {
+    global testPid
+    if dialog := WinExist('ahk_class #32770 ahk_pid ' testPid) {
+        PostMessage(0x111, 2, 0, , dialog)
+        if !WinWaitClose(dialog, , 1) {
+            PostMessage(0x111, 7, 0, , dialog)
+            Check(WinWaitClose(dialog, , 2), 'Recent failed open dialog closes')
+        }
+    }
 }
 
 ; Start with the existing isolated INI. An empty file opens an untitled document,
@@ -662,7 +793,7 @@ RecentNames(tree) {
     names := ''
     item := SendMessage(0x110A, 4, SendMessage(0x110A, 0, 0, tree), tree)
     while item {
-        text := TreeText(tree, item)
+        text := TreeText(tree, item, 32768)
         SplitPath(text, &name)
         names .= (names != '' ? '|' : '') name
         item := SendMessage(0x110A, 1, item, tree)
@@ -1162,24 +1293,26 @@ EditorText(editor) {
 
 ; Read a real remote TVITEMW. Return empty for a node deleted during refresh;
 ; polling callers retry against the new root. Common controls need remote buffers.
-TreeText(tree, item) {
+; capacity counts UTF-16 characters including NUL; existing callers keep 256.
+TreeText(tree, item, capacity := 256) {
     global testPid
     if !item
         return ''
     process := DllCall('OpenProcess', 'uint', 0x438, 'int', false, 'uint', testPid, 'ptr')
-    memory := DllCall('VirtualAllocEx', 'ptr', process, 'ptr', 0, 'uptr', 4096, 'uint', 0x3000, 'uint', 4, 'ptr')
+    bytes := Max(4096, 128 + capacity * 2)
+    memory := DllCall('VirtualAllocEx', 'ptr', process, 'ptr', 0, 'uptr', bytes, 'uint', 0x3000, 'uint', 4, 'ptr')
     try {
         if !process || !memory
             throw Error('Cannot allocate remote TreeView buffer')
-        data := Buffer(4096, 0)
+        data := Buffer(bytes, 0)
         NumPut('uint', 1, data, 0)
         NumPut('ptr', item, data, 8)
         NumPut('ptr', memory + 128, data, 24)
-        NumPut('int', 256, data, 32)
-        DllCall('WriteProcessMemory', 'ptr', process, 'ptr', memory, 'ptr', data, 'uptr', 4096, 'ptr', 0)
+        NumPut('int', capacity, data, 32)
+        DllCall('WriteProcessMemory', 'ptr', process, 'ptr', memory, 'ptr', data, 'uptr', bytes, 'ptr', 0)
         if !SendMessage(0x113E, 0, memory, tree)
             return ''
-        DllCall('ReadProcessMemory', 'ptr', process, 'ptr', memory, 'ptr', data, 'uptr', 4096, 'ptr', 0)
+        DllCall('ReadProcessMemory', 'ptr', process, 'ptr', memory, 'ptr', data, 'uptr', bytes, 'ptr', 0)
         return StrGet(data.Ptr + 128, 'UTF-16')
     } finally {
         if memory

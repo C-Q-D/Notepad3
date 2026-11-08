@@ -155,15 +155,16 @@ enum { SIDEBAR_FILE = 0, SIDEBAR_UNLOADED = 1, SIDEBAR_LOADED = 2, SIDEBAR_RECEN
        SIDEBAR_RECENT_ITEM = 5, SIDEBAR_RECENT_EMPTY = 6,
        SIDEBAR_KIND_MASK = 15, SIDEBAR_COUNT_SHIFT = 4, SIDEBAR_COUNT_LIMIT = 1000, SIDEBAR_COUNT_FOLDERS = 256 };
 
-// Read an existing item's name and kind into MAX_PATH_EXPLICIT WCHARs of storage.
+// Read native text and kind into the caller's explicit WCHAR capacity. Directory
+// names fit MAX_PATH; recent text holds a full path and needs PATHLONG_MAX_CCH.
 // False means that the item no longer exists; no returned buffer is borrowed.
-static bool _Sidebar_GetItem(HTREEITEM item, LPWSTR name, LPARAM* kind)
+static bool _Sidebar_GetItem(HTREEITEM item, LPWSTR name, int capacity, LPARAM* kind)
 {
     TVITEMW value = { 0 };
     value.mask = TVIF_TEXT | TVIF_PARAM;
     value.hItem = item;
     value.pszText = name;
-    value.cchTextMax = MAX_PATH_EXPLICIT;
+    value.cchTextMax = capacity;
     bool const found = TreeView_GetItem(s_tree, &value) != FALSE;
     *kind = value.lParam & SIDEBAR_KIND_MASK;
     return found;
@@ -180,9 +181,11 @@ static HPATHL _Sidebar_ItemPath(HTREEITEM item)
         return result;
     }
     if (TreeView_GetParent(s_tree, item) == s_recent) {
-        WCHAR name[MAX_PATH_EXPLICIT];
+        LPWSTR const buffer = Path_WriteAccessBuf(result, PATHLONG_MAX_CCH);
         LPARAM kind;
-        if (_Sidebar_GetItem(item, name, &kind) && kind == SIDEBAR_RECENT_ITEM) { Path_Reset(result, name); }
+        if (_Sidebar_GetItem(item, buffer, (int)Path_GetBufCount(result), &kind) && kind == SIDEBAR_RECENT_ITEM) {
+            Path_Sanitize(result);
+        } else { Path_Empty(result, false); }
         return result;
     }
     HSTRINGW relative = StrgCreate(NULL);
@@ -190,7 +193,7 @@ static HPATHL _Sidebar_ItemPath(HTREEITEM item)
     while (item && item != root) {
         WCHAR name[MAX_PATH_EXPLICIT];
         LPARAM kind;
-        if (!_Sidebar_GetItem(item, name, &kind) ||
+        if (!_Sidebar_GetItem(item, name, COUNTOF(name), &kind) ||
             (kind != SIDEBAR_FILE && kind != SIDEBAR_UNLOADED && kind != SIDEBAR_LOADED)) {
             StrgDestroy(relative);
             return result;
@@ -673,7 +676,7 @@ static HTREEITEM _Sidebar_FindPath(const HPATHL path, bool refreshMissing)
         StringCchCopyN(component, COUNTOF(component), part, size);
         WCHAR name[MAX_PATH_EXPLICIT];
         LPARAM kind;
-        if (!_Sidebar_GetItem(parent, name, &kind) ||
+        if (!_Sidebar_GetItem(parent, name, COUNTOF(name), &kind) ||
             (kind != SIDEBAR_UNLOADED && kind != SIDEBAR_LOADED)) {
             return NULL;
         }
@@ -686,7 +689,7 @@ static HTREEITEM _Sidebar_FindPath(const HPATHL path, bool refreshMissing)
             for (HTREEITEM child = TreeView_GetChild(s_tree, parent); child; child = TreeView_GetNextSibling(s_tree, child)) {
                 // A localized hint can have the same text as a newly created
                 // file. Ignore non-path rows so refreshMissing re-enumerates it.
-                if (_Sidebar_GetItem(child, name, &kind) &&
+                if (_Sidebar_GetItem(child, name, COUNTOF(name), &kind) &&
                     (kind == SIDEBAR_FILE || kind == SIDEBAR_UNLOADED || kind == SIDEBAR_LOADED) &&
                     CompareStringOrdinal(component, -1, name, -1, TRUE) == CSTR_EQUAL) {
                     match = child;
@@ -709,10 +712,11 @@ static HTREEITEM _Sidebar_FindPath(const HPATHL path, bool refreshMissing)
 
 // Match whole canonical paths in the pipe-separated sidebar-only hidden list.
 // file is a nonempty absolute path; no MRU or setting is changed by this query.
+// Removing the last hide can leave the owned string without an allocated buffer.
 static bool _Sidebar_IsRecentHidden(LPCWSTR file)
 {
     size_t const length = wcslen(file);
-    for (LPCWSTR part = StrgGet(Settings.SidebarRecentHidden); *part;) {
+    for (LPCWSTR part = StrgGet(Settings.SidebarRecentHidden); part && *part;) {
         LPCWSTR const end = wcschr(part, L'|');
         size_t const count = end ? (size_t)(end - part) : wcslen(part);
         if (count == length && CompareStringOrdinal(part, (int)count, file, (int)length, TRUE) == CSTR_EQUAL) { return true; }
@@ -812,9 +816,9 @@ static void _Sidebar_RefreshRecent(void)
 static void _Sidebar_ClearRecent(void)
 {
     for (HTREEITEM item = TreeView_GetChild(s_tree, s_recent); item; item = TreeView_GetNextSibling(s_tree, item)) {
-        WCHAR name[MAX_PATH_EXPLICIT];
-        LPARAM kind;
-        if (_Sidebar_GetItem(item, name, &kind) && kind == SIDEBAR_RECENT_ITEM) { _Sidebar_ChangeRecentHidden(name, true); }
+        HPATHL path = _Sidebar_ItemPath(item);
+        if (Path_IsNotEmpty(path)) { _Sidebar_ChangeRecentHidden(Path_Get(path), true); }
+        Path_Release(path);
     }
     _Sidebar_RefreshRecent();
 }
@@ -1023,7 +1027,7 @@ static void _Sidebar_CollapseAll(HTREEITEM parent)
     for (HTREEITEM child = TreeView_GetChild(s_tree, parent); child; child = TreeView_GetNextSibling(s_tree, child)) {
         WCHAR name[MAX_PATH_EXPLICIT];
         LPARAM kind;
-        if (_Sidebar_GetItem(child, name, &kind) && (kind == SIDEBAR_LOADED || kind == SIDEBAR_UNLOADED)) {
+        if (_Sidebar_GetItem(child, name, COUNTOF(name), &kind) && (kind == SIDEBAR_LOADED || kind == SIDEBAR_UNLOADED)) {
             _Sidebar_CollapseDirectory(child);
         }
     }
@@ -1036,7 +1040,7 @@ static void _Sidebar_ActivateRow(HTREEITEM item, POINT point)
 {
     WCHAR name[MAX_PATH_EXPLICIT];
     LPARAM kind;
-    if (!_Sidebar_GetItem(item, name, &kind)) { return; }
+    if (!_Sidebar_GetItem(item, name, COUNTOF(name), &kind)) { return; }
     if (item == s_recent) {
         if (point.x >= 0 && s_recentCount) {
             RECT row, client;
@@ -1130,7 +1134,7 @@ static void _Sidebar_DrawRow(NMTVCUSTOMDRAW* draw)
     HTREEITEM const item = (HTREEITEM)draw->nmcd.dwItemSpec;
     WCHAR name[MAX_PATH_EXPLICIT];
     LPARAM kind;
-    if (!s_drawing || !_Sidebar_GetItem(item, name, &kind)) { return; }
+    if (!s_drawing || !_Sidebar_GetItem(item, name, COUNTOF(name), &kind)) { return; }
     RECT row, client;
     GetClientRect(s_tree, &client);
     if (!TreeView_GetItemRect(s_tree, item, &row, FALSE)) { return; }
@@ -1178,7 +1182,9 @@ static void _Sidebar_DrawRow(NMTVCUSTOMDRAW* draw)
             SidebarDrawing_Text(dc, s_drawing, right, SidebarFontSmall, text, item == s_hotItem ? p->accent : p->weak);
         }
     } else if (kind == SIDEBAR_RECENT_ITEM) {
-        _Sidebar_DrawRecentRow(dc, item, name, text);
+        HPATHL path = _Sidebar_ItemPath(item);
+        _Sidebar_DrawRecentRow(dc, item, Path_Get(path), text);
+        Path_Release(path);
     } else if (kind == SIDEBAR_RECENT_EMPTY) {
         SidebarDrawing_Text(dc, s_drawing, name, SidebarFontBody, text, p->secondary);
     } else {

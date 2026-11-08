@@ -32,7 +32,8 @@ void Sidebar_SetRoot(const HPATHL folder);
 // The first sync after rebuilding honors the persisted directory-group collapse.
 // Refresh recent files independently of the root and visibility. fileOpened is
 // true only for a successful open/explicit same-file activation: remove that
-// nonempty file from sidebar hides. Layout, saves and root changes pass false.
+// nonempty file from sidebar hides. Reloads (including automatic file watching),
+// layout, saves and root changes pass false.
 void Sidebar_SyncToFile(const HPATHL file, bool fileOpened);
 // Re-enumerate the root and restore expanded paths and selection where they exist.
 void Sidebar_Refresh(void);
