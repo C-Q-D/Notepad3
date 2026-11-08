@@ -1,0 +1,535 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Notepad3 文件栏定稿 · 终端 × 浮岛</title>
+<!--
+  Notepad3 侧边文件栏的定稿设计（2026-11-08，终端 × 浮岛）。
+  这是一份独立的设计稿：浏览器直接打开即可查看和点击，不依赖任何外部文件。
+  页面顶部的「强调色 / 行密度」切换只用于比较设计，不是要实现的功能。
+  实现要点见同目录的 说明.md。
+-->
+<style>
+body{margin:0;min-height:100vh;background:#050605;color:#e6ede6;font-family:"Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI","PingFang SC",system-ui,sans-serif}
+a{color:#7ee787}a:hover{color:#b4f5bb}
+.stage{min-width:1328px;padding:20px 24px 32px;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;gap:14px}
+.ctl{width:1280px;display:flex;align-items:center;gap:18px;font-size:12px;color:#9aa29a}
+.ctl-group{display:flex;align-items:center;gap:6px}
+.ctl button{font:inherit;color:#c9d1c9;background:#121412;border:1px solid #232823;border-radius:6px;height:26px;padding:0 10px;display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+.ctl button[aria-pressed="true"]{border-color:#7ee787;color:#ffffff}
+.ctl .sw{width:10px;height:10px;border-radius:5px}
+.ctl-note{margin-left:auto;color:#7d867d}
+
+.cx{font-family:"Segoe UI Variable Text","Segoe UI","Microsoft YaHei UI","PingFang SC",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+.cx button{font:inherit;color:inherit;border:0;background:transparent;margin:0;padding:0;cursor:default}
+.cx button:focus-visible{outline:1px solid #7ee787;outline-offset:-1px}
+.cx-mono{font-family:"Cascadia Mono","Cascadia Code",Consolas,"Microsoft YaHei UI",monospace}
+.win{width:1280px;height:800px;display:flex;flex-direction:column;background:#0c0d0c;color:#e6ede6;overflow:hidden;font-size:13px;border-radius:10px;box-shadow:0 0 0 1px #1d221d}
+.cx-ib{width:28px;height:28px;border-radius:7px;display:inline-flex;align-items:center;justify-content:center;color:#98a098;flex-shrink:0}
+.cx-ib:hover{background:#1c201c;color:#e6ede6}
+.cx-round{width:30px;height:30px;border-radius:15px;display:inline-flex;align-items:center;justify-content:center;color:#a3aca3;background:#1b1f1b;flex-shrink:0}
+.cx-round:hover{background:#252b25;color:#e6ede6}
+.cx-menu{padding:0 8px;height:22px;border-radius:5px;display:inline-flex;align-items:center}
+.cx-menu:hover{background:#1c201c}
+.cx-search{height:34px;display:flex;align-items:center;gap:9px;padding:0 6px 0 14px;border-radius:17px;background:#1a1e1a;border:1px solid transparent;box-sizing:border-box}
+.cx-search:hover{border-color:#263026}
+.cx-search:focus-within{border-color:#3f5c41;background:#151915}
+.cx-search input{all:unset;flex:1;min-width:0;font-size:12.5px;color:#e6ede6;caret-color:#7ee787;font-family:inherit}
+.cx-search input::placeholder{color:#8b949e}
+.cx-sec{height:30px;display:flex;align-items:center;gap:6px;padding:0 6px 0 10px;color:#8b949e;font-size:12px}
+.cx-sec-t{flex:1;min-width:0;height:24px;display:flex;align-items:center;gap:8px;text-align:left}
+.cx-sec-t:hover{color:#c9d1c9}
+.cx-act{font-size:11.5px;color:#8b949e;padding:1px 4px;border-radius:4px;opacity:0}
+.cx-sec:hover .cx-act,.cx-act:focus-visible{opacity:1}
+.cx-act:hover{color:#e6ede6;background:#1c201c}
+.cx-row{width:100%;display:flex;align-items:center;text-align:left;white-space:pre;border-radius:7px;box-sizing:border-box;padding:0 10px;color:#c9d1c9}
+.cx-row:hover{background:#181c18}
+.cx-row.is-sel{background:#1f261f}
+.cx-cur{width:100%;display:flex;align-items:center;text-align:left;white-space:pre;border-radius:7px;box-sizing:border-box;padding:0 10px;color:#0b0c0b;font-weight:700}
+.cx-tb{font-size:11.5px;color:#8b949e;padding:2px 5px;border-radius:4px}
+.cx-tb:hover{color:#e6ede6;background:#1c201c}
+.cx-scroll{scrollbar-width:thin;scrollbar-color:#2a312a transparent}
+.where{flex:1;min-width:0;text-align:right;color:#8b949e;overflow:hidden;text-overflow:ellipsis}
+.island{width:300px;flex-shrink:0;display:flex;flex-direction:column;border-radius:16px;background:#121412;border:1px solid rgba(255,255,255,.06);box-shadow:0 14px 36px rgba(0,0,0,.5);overflow:hidden;font-size:12.5px}
+.editor{flex:1;min-width:0;display:flex;position:relative;border-radius:12px;overflow:hidden;background:#252526;border:1px solid rgba(255,255,255,.05)}
+.gutter{width:48px;flex-shrink:0;box-sizing:border-box;padding:8px 10px 0 0;text-align:right;background:#212123;color:#858c96;font-size:12.5px}
+.code{flex:1;min-width:0;padding-top:8px;font-size:13px;overflow:hidden}
+.ln{height:19px;line-height:19px}
+.code .ln{padding-left:14px;white-space:pre}
+.sep{width:1px;height:18px;background:#232823;margin:0 6px}
+</style>
+</head>
+<body>
+<div class="stage" id="app"></div>
+<script>
+(function () {
+  'use strict';
+
+  var ACCENTS = [['#7ee787', '终端绿'], ['#8ea2ff', '浮岛蓝'], ['#f0bd63', '琥珀']];
+  var DENSITY = [['紧凑', 22], ['标准', 24], ['宽松', 28]];
+  var ROOT = 'D:\\可直接运行程序\\Notepad3\\';
+  var OUTSIDE = 'F:\\workspace\\forks\\Notepad3\\src\\';
+
+  var state = {
+    accent: '#7ee787',
+    rowH: 24,
+    sidebar: true,
+    expanded: { 'Themes': true },
+    current: 'Themes/Dark.ini',
+    selected: 'Themes/Dark.ini',
+    query: '',
+    openRecent: true,
+    openTree: true,
+    recent: ['Themes/Dark.ini', 'Docs/Changes.txt', '@src/Sidebar.h', 'Notepad3.ini'],
+    hint: ''
+  };
+
+  // 目录结构取自 D:\可直接运行程序\Notepad3（2026-11-08 的实际内容）。
+  function f(n) { return { n: n }; }
+  function d(n, c) { return { n: n, c: c }; }
+  var LOCALES = ['af-ZA', 'be-BY', 'de-DE', 'el-GR', 'en-GB', 'es-ES', 'fi-FI', 'fr-FR', 'hi-IN', 'hu-HU', 'id-ID', 'it-IT', 'ja-JP', 'ko-KR', 'nl-NL', 'pl-PL', 'pt-BR', 'pt-PT', 'ru-RU', 'sk-SK', 'sv-SE', 'tr-TR', 'vi-VN', 'zh-CN', 'zh-TW'];
+  var TREE = [
+    d('Docs', [
+      d('crypto', [f('encryption-doc.txt'), f('read_me.txt')]),
+      d('uthash', [f('ChangeLog.txt'), f('doc (more)'), f('License.txt'), f('userguide.txt')]),
+      f('Changes.txt'), f('KeyboardShortcuts.txt'), f('License.txt'), f('Notepad2.txt'), f('Notepad3.txt'),
+      f('Readme-mod.txt'), f('Readme-Notepad2.txt'), f('Readme.txt')
+    ]),
+    d('Favorites', []),
+    d('lng', LOCALES.map(function (l) { return d(l, [f('mplng.dll.mui'), f('np3lng.dll.mui')]); }).concat([f('mplng.dll'), f('np3lng.dll')])),
+    d('Themes', [f('Dark.ini'), f('Obsidian.ini'), f('Sombra.ini')]),
+    f('minipath.exe'), f('minipath.ini'), f('Notepad3.exe'), f('Notepad3.ini'), f('np3encrypt.exe')
+  ];
+
+  // 编辑器区只预置了几个文件的开头，用来演示点击文件后编辑器跟着切换。
+  var DOCS = {
+    'Themes/Dark.ini': { kind: 'ini', bom: true, lines: [
+      '# 2024/05/27 - Lexer Styles "Dark" taken from Axl Cash (https://www.axlcash.com/notepad2-dark-theme-schemes-style-or-whatever-you-call-it)',
+      '', '[Custom Colors]',
+      '01=#252526', '02=#1346CE', '03=#A2C5D4', '04=#52A5F8', '05=#0D8206', '06=#B2D766', '07=#B5B5B9', '08=#F6B05B',
+      '09=#54EDBF', '10=#FCA287', '11=#ACFBC0', '12=#F2B40D', '13=#F2450D', '14=#F53D3E', '15=#F653F6', '16=#92FB53',
+      '[Common Base]',
+      'Default Style=font:$Code0; fore:#FFFFE2; back:#252526',
+      'Margins and Line Numbers=font:Consolas; size:-2; bold; fore:#A4FFFF; back:#444444',
+      'Matching Braces (Indicator)=fore:#009100; back:#252526; alpha:40; alpha2:220; indic_roundbox',
+      'Matching Braces Error (Indicator)=fore:#FF0080; back:#252526; alpha:140; alpha2:220; indic_roundbox',
+      'Control Characters (Font)=size:-1; fore:#FFF1A8; back:#252526',
+      'Indentation Guide (Color)=fore:#A0A0A0; back:#252526',
+      'Selected Text (Colors)=fore:#FFFFE2; back:#409FFF; eolfilled; alpha:80',
+      'Whitespace (Colors, Size 0-12)=fore:#666600',
+      'Non-Printable Characters (Colors)=fore:#707070; alpha:200',
+      'Current Line Background (Color)=size:2; fore:#4F9D9D; back:#C1C1C1; alpha:50'
+    ] },
+    'Themes/Obsidian.ini': { kind: 'ini', bom: true, lines: [
+      '# 2024/05/27 - Lexer Styles "Obsidian" taken from xCONFLiCTiONx',
+      '', '[Custom Colors]',
+      '02=#B5E2F5', '03=#A2C5D4', '04=#89ACEC', '06=#B2D766', '08=#F6B05B', '11=#594A05', '12=#F2B40D', '13=#F2450D',
+      '14=#F53D3E', '15=#F653F6', '16=#BE9450', '01=#000000', '05=#006633', '07=#648000', '09=#FFFFFF'
+    ] },
+    'Themes/Sombra.ini': { kind: 'ini', bom: true, lines: [
+      '# 2024/05/27 - Lexer Style "NewSombra" from MadDogVachon (https://github.com/MadDogVachon)',
+      '', '[Custom Colors]',
+      '01=#EDEDED', '02=#B3C8F8', '03=#679ACB', '04=#749DFF', '05=#00DA63', '06=#7AA323', '07=#7EA100', '08=#C46A00',
+      '09=#151515', '10=#1B1B01', '11=#322C00', '12=#634F00', '13=#C83C00', '14=#FF2430', '15=#DC00DC'
+    ] },
+    'Docs/Changes.txt': { kind: 'txt', lines: [
+      '================================================================================',
+      '=                                                                              =',
+      '=            Notepad3 - light-weight Scintilla-based text editor for Windows   =',
+      '=                                                                              =',
+      '=                                                   (c) Rizonesoft 2008-2026   =',
+      '=                                                     https://rizonesoft.com   =',
+      '=                                                                              =',
+      '================================================================================',
+      'Rizonesoft Notepad3 --- CHANGELOG ---',
+      '================================================================================',
+      '',
+      '--------------------------------------------------------',
+      'LEGEND:',
+      '--------------------------------------------------------',
+      '1) NEW: (Added, Feature, Optimize)',
+      '2) CHANGES: (Change, Enhancement)'
+    ] },
+    '@src/Sidebar.h': { kind: 'c', lines: [
+      '// Folder sidebar UI. The main window owns its lifetime and calls it on the UI thread.',
+      '#pragma once',
+      '#include "TypeDefs.h"',
+      '',
+      '// Persisted widths use 96-DPI logical pixels; layout may further limit available space.',
+      'enum { SIDEBAR_MIN_WIDTH = 100, SIDEBAR_MAX_WIDTH = 4000 };',
+      '',
+      '// Create child controls for parent using the configured visibility; root restoration',
+      '// follows startup FileLoad. Return false if either control or subclass fails.',
+      'bool Sidebar_Create(HWND parent);',
+      '// Show or hide both controls; hiding returns focus to the editor when needed.',
+      'void Sidebar_Show(bool visible);',
+      '// Place the sidebar in the available client rectangle and consume its left edge.',
+      '// The caller uses the remaining rectangle for the editor; width is in pixels.',
+      'void Sidebar_Layout(RECT* available);',
+      '// Reapply the native tree theme after a theme or DPI change. Safe before creation.',
+      'void Sidebar_OnThemeChanged(void);',
+      '// Replace the root with folder (non-null path handle). Missing folders yield an',
+      '// empty tree without a dialog. On success the selected folder setting stores the',
+      '// canonical long-name path, matching FileLoad\'s normalization of current files.',
+      'void Sidebar_SetRoot(const HPATHL folder);',
+      '// Select and reveal file within the root; clear selection outside it or when empty.',
+      '// A missing entry in an already loaded parent triggers a local re-enumeration.',
+      'void Sidebar_SyncToFile(const HPATHL file);',
+      '// Handle notifications from the sidebar tree only; return the TreeView result.',
+      'LRESULT Sidebar_OnNotify(const NMHDR* notification);',
+      '// Re-enumerate the root and restore expanded paths and selection where they exist.',
+      'void Sidebar_Refresh(void);',
+      '// Consume unmodified tree keyboard messages before main accelerators can turn',
+      '// Enter into an editor newline or F5 into Revert. Ctrl/Alt combinations pass on.',
+      'bool Sidebar_PreTranslateMessage(MSG* message);'
+    ] }
+  };
+
+  function esc(text) {
+    return String(text).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+  function isBinary(name) { return /\.(exe|dll|mui)$/i.test(name); }
+  function extOf(name) { var i = name.lastIndexOf('.'); return i > 0 ? name.slice(i + 1).toLowerCase() : ''; }
+  function parentOf(path) { var i = path.lastIndexOf('/'); return i < 0 ? '' : path.slice(0, i); }
+  function baseName(path) { return path.slice(path.lastIndexOf('/') + 1); }
+  function tint(hex, alpha) {
+    var n = parseInt(hex.slice(1), 16);
+    return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + alpha + ')';
+  }
+  // 文件夹蓝色加粗；按扩展名着色；二进制文件灰显。
+  function typeFg(name, isDir) {
+    if (isDir) return '#79c0ff';
+    var ext = extOf(name);
+    if (ext === 'ini') return '#d2a8ff';
+    if (ext === 'h' || ext === 'c') return '#ffa657';
+    if (isBinary(name)) return '#8b949e';
+    return '#c9d1c9';
+  }
+  function whereOf(path) {
+    if (path.charAt(0) === '@') return 'F:\\…\\src\\';
+    var p = parentOf(path);
+    return p ? p.replace(/\//g, '\\') + '\\' : '.\\';
+  }
+  function fullPath(path) {
+    if (path.charAt(0) === '@') return OUTSIDE + baseName(path);
+    return ROOT + path.replace(/\//g, '\\');
+  }
+  function relPath(path) {
+    return path.charAt(0) === '@' ? fullPath(path) : path.replace(/\//g, '\\');
+  }
+
+  function openFile(path) {
+    if (isBinary(path)) {
+      state.selected = path;
+      state.hint = '二进制文件，不在编辑器中打开';
+      return;
+    }
+    if (path.charAt(0) !== '@') {
+      var segs = path.split('/');
+      for (var k = 1; k < segs.length; k++) state.expanded[segs.slice(0, k).join('/')] = true;
+    }
+    state.recent = [path].concat(state.recent.filter(function (p) { return p !== path; })).slice(0, 4);
+    state.current = path;
+    state.selected = path;
+    state.hint = '';
+  }
+  function toggleDir(path) {
+    state.expanded[path] = !state.expanded[path];
+    state.selected = path;
+    state.hint = '';
+  }
+
+  // 线框前缀：同级最后一项用 └─，否则 ├─；上层未画完的补 │，画完的补空格。
+  function flatten(nodes, lead, prefixPath, out) {
+    nodes.forEach(function (node, i) {
+      var last = i === nodes.length - 1;
+      var path = prefixPath ? prefixPath + '/' + node.n : node.n;
+      var isDir = !!node.c;
+      var open = isDir && !!state.expanded[path];
+      out.push({
+        path: path, isDir: isDir, isNote: false,
+        isCur: !isDir && path === state.current,
+        isSel: path === state.selected,
+        prefix: lead + (last ? '└─ ' : '├─ '),
+        name: isDir ? node.n + '/' : node.n,
+        suffix: isDir && !open ? (node.c.length ? '  (' + node.c.length + ')' : '  (空)') : '',
+        fg: typeFg(node.n, isDir),
+        weight: isDir ? 700 : 400
+      });
+      if (open) {
+        var childLead = lead + (last ? '   ' : '│  ');
+        if (node.c.length === 0) {
+          out.push({ path: '', isDir: false, isNote: true, isCur: false, isSel: false, prefix: childLead + '└─ ', name: '（空）', suffix: '', fg: '#7d867d', weight: 400 });
+        } else {
+          flatten(node.c, childLead, path, out);
+        }
+      }
+    });
+    return out;
+  }
+  function allFiles(nodes, prefix, out) {
+    nodes.forEach(function (node) {
+      var path = prefix ? prefix + '/' + node.n : node.n;
+      if (node.c) allFiles(node.c, path, out); else out.push(path);
+    });
+    return out;
+  }
+
+  function hlIni(line) {
+    if (/^\s*[#;]/.test(line)) return [[line, '#8a9a8a']];
+    if (/^\s*\[.*\]\s*$/.test(line)) return [[line, '#F6B05B']];
+    var i = line.indexOf('=');
+    if (i > 0) return [[line.slice(0, i), '#52A5F8'], ['=', '#B5B5B9'], [line.slice(i + 1), '#B2D766']];
+    return [[line, '#FFFFE2']];
+  }
+  function hlC(line) {
+    if (/^\s*\/\//.test(line)) return [[line, '#6a9955']];
+    if (/^\s*#/.test(line)) return [[line, '#c586c0']];
+    var parts = [];
+    var re = /\b(enum|bool|void|const|LRESULT|MSG|RECT|HPATHL|HWND|NMHDR)\b/g;
+    var last = 0;
+    var m;
+    while ((m = re.exec(line))) {
+      if (m.index > last) parts.push([line.slice(last, m.index), '#d4d4d4']);
+      parts.push([m[0], /^[A-Z]/.test(m[0]) ? '#4ec9b0' : '#569cd6']);
+      last = re.lastIndex;
+    }
+    if (last < line.length) parts.push([line.slice(last), '#d4d4d4']);
+    return parts;
+  }
+
+  var ICON = {
+    panel: '<svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"><rect x="1.5" y="2.5" width="13" height="11" rx="2"></rect><path d="M6 2.5v11"></path><path d="M3.2 5.2h1.3M3.2 7.4h1.3M3.2 9.6h1.3" stroke-linecap="round"></path></svg>',
+    newDoc: '<svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"><path d="M3.5 2.5a1 1 0 0 1 1-1h5l3 3v9a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1z"></path><path d="M9.5 1.5v2a1 1 0 0 0 1 1h2"></path></svg>',
+    open: '<svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"><path d="M1.5 12.5v-8a1 1 0 0 1 1-1h3.4l1.4 1.5h5.2a1 1 0 0 1 1 1v1.5"></path><path d="M1.5 12.5l2-5.5h11l-2 5.5z"></path></svg>',
+    save: '<svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"><path d="M2.5 3.5a1 1 0 0 1 1-1h8l2 2v8a1 1 0 0 1-1 1h-9a1 1 0 0 1-1-1z"></path><path d="M5 2.5v3.5h5V2.5M5 13.5v-4h6v4"></path></svg>',
+    undo: '<svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5.5 3.5l-3 3 3 3"></path><path d="M2.5 6.5h7a3.5 3.5 0 0 1 0 7h-2"></path></svg>',
+    redo: '<svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.5 3.5l3 3-3 3"></path><path d="M13.5 6.5h-7a3.5 3.5 0 0 0 0 7h2"></path></svg>',
+    cut: '<svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"><circle cx="4.5" cy="11.5" r="2"></circle><circle cx="11.5" cy="11.5" r="2"></circle><path d="M6 10l6-7.5M10 10L4 2.5"></path></svg>',
+    copy: '<svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"><rect x="5.5" y="5.5" width="8" height="8" rx="1.5"></rect><path d="M10.5 5.5v-2a1 1 0 0 0-1-1h-6a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h2"></path></svg>',
+    paste: '<svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"><rect x="3" y="3" width="10" height="11.5" rx="1.5"></rect><rect x="5.5" y="1.5" width="5" height="3" rx="1"></rect></svg>',
+    find: '<svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"><circle cx="7" cy="7" r="4.5"></circle><path d="M10.5 10.5l3.5 3.5"></path></svg>',
+    plus: '<svg aria-hidden="true" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M8 3v10M3 8h10"></path></svg>',
+    refresh: '<svg aria-hidden="true" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 8a5 5 0 1 1-1.5-3.6"></path><path d="M12 1.8v2.8H9.2"></path></svg>',
+    close: '<svg aria-hidden="true" width="10" height="10" viewBox="0 0 10 10"><path d="M2 2l6 6M8 2L2 8" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"></path></svg>'
+  };
+
+  function controls() {
+    var acc = ACCENTS.map(function (a) {
+      return '<button data-act="accent" data-v="' + a[0] + '" aria-pressed="' + (state.accent === a[0]) + '"><span class="sw" style="background:' + a[0] + '"></span>' + a[1] + '</button>';
+    }).join('');
+    var den = DENSITY.map(function (p) {
+      return '<button data-act="density" data-v="' + p[1] + '" aria-pressed="' + (state.rowH === p[1]) + '">' + p[0] + ' ' + p[1] + '</button>';
+    }).join('');
+    return '<div class="ctl"><span>强调色</span><div class="ctl-group">' + acc + '</div><span>行密度</span><div class="ctl-group">' + den + '</div>' +
+      '<span class="ctl-note">顶部切换只用于比较设计，不是要实现的功能</span></div>';
+  }
+
+  function chrome(title) {
+    var menus = ['文件(F)', '编辑(E)', '查找(R)', '查看(V)', '外观(P)', '设置(S)', '?(H)'].map(function (m) { return '<button class="cx-menu">' + m + '</button>'; }).join('');
+    var sideStyle = state.sidebar ? 'color:' + state.accent + ';background:' + tint(state.accent, 0.14) : '';
+    return '' +
+      '<div style="height:32px;display:flex;align-items:center;gap:8px;padding-left:12px;flex-shrink:0">' +
+        '<svg aria-hidden="true" width="16" height="16" viewBox="0 0 16 16"><rect x="2.5" y="1.5" width="11" height="13" rx="2" fill="#4fc38a" fill-opacity="0.22" stroke="#4fc38a"></rect><path d="M5 5h6M5 8h6M5 11h4" stroke="#4fc38a" stroke-linecap="round"></path></svg>' +
+        '<span style="flex:1;font-size:12px;color:#c4cbc4">' + esc(title) + '</span>' +
+        '<div style="display:flex;height:32px">' +
+          '<button aria-label="最小化" style="width:46px;height:32px;display:flex;align-items:center;justify-content:center;color:#c4cbc4"><svg aria-hidden="true" width="10" height="10" viewBox="0 0 10 10"><path d="M0 5.5h10" stroke="currentColor"></path></svg></button>' +
+          '<button aria-label="最大化" style="width:46px;height:32px;display:flex;align-items:center;justify-content:center;color:#c4cbc4"><svg aria-hidden="true" width="10" height="10" viewBox="0 0 10 10"><rect x="0.5" y="0.5" width="9" height="9" rx="1.5" fill="none" stroke="currentColor"></rect></svg></button>' +
+          '<button aria-label="关闭" style="width:46px;height:32px;display:flex;align-items:center;justify-content:center;color:#c4cbc4"><svg aria-hidden="true" width="10" height="10" viewBox="0 0 10 10"><path d="M0.5 0.5l9 9M9.5 0.5l-9 9" stroke="currentColor"></path></svg></button>' +
+        '</div>' +
+      '</div>' +
+      '<nav aria-label="菜单" style="height:26px;display:flex;align-items:center;padding:0 6px;font-size:12.5px;color:#cdd4cd;flex-shrink:0">' + menus + '</nav>' +
+      '<div role="toolbar" aria-label="工具栏" style="height:38px;display:flex;align-items:center;gap:2px;padding:0 8px;flex-shrink:0">' +
+        '<button class="cx-ib" data-act="sidebar" aria-label="文件栏" title="文件栏" aria-pressed="' + state.sidebar + '" style="' + sideStyle + '">' + ICON.panel + '</button>' +
+        '<span class="sep" aria-hidden="true"></span>' +
+        '<button class="cx-ib" aria-label="新建">' + ICON.newDoc + '</button>' +
+        '<button class="cx-ib" aria-label="打开">' + ICON.open + '</button>' +
+        '<button class="cx-ib" aria-label="保存">' + ICON.save + '</button>' +
+        '<span class="sep" aria-hidden="true"></span>' +
+        '<button class="cx-ib" aria-label="撤销">' + ICON.undo + '</button>' +
+        '<button class="cx-ib" aria-label="重做">' + ICON.redo + '</button>' +
+        '<span class="sep" aria-hidden="true"></span>' +
+        '<button class="cx-ib" aria-label="剪切">' + ICON.cut + '</button>' +
+        '<button class="cx-ib" aria-label="复制">' + ICON.copy + '</button>' +
+        '<button class="cx-ib" aria-label="粘贴">' + ICON.paste + '</button>' +
+        '<span class="sep" aria-hidden="true"></span>' +
+        '<button class="cx-ib" aria-label="查找">' + ICON.find + '</button>' +
+      '</div>';
+  }
+
+  function recentSection() {
+    var acc = state.accent;
+    var h = state.rowH;
+    var rows = state.recent.map(function (path, i) {
+      var cur = path === state.current;
+      var name = baseName(path);
+      return '<button class="cx-row" data-act="open" data-path="' + esc(path) + '" title="' + esc(fullPath(path)) + '" style="height:' + h + 'px;gap:10px">' +
+        '<span style="width:10px;color:' + acc + '">' + (cur ? '▸' : ' ') + '</span>' +
+        '<span style="color:#7d867d">' + (i + 1) + '</span>' +
+        '<span style="color:' + (cur ? acc : typeFg(name, false)) + ';font-weight:' + (cur ? 700 : 400) + '">' + esc(name) + '</span>' +
+        '<span class="where">' + esc(whereOf(path)) + '</span></button>';
+    }).join('');
+    var empty = state.recent.length ? '' : '<div style="height:' + h + 'px;display:flex;align-items:center;padding:0 10px;color:#8b949e">打开过的文件会出现在这里</div>';
+    return '' +
+      '<div class="cx-sec">' +
+        '<button class="cx-sec-t" data-act="toggleRecent" aria-expanded="' + state.openRecent + '"><span># 最近打开</span><span style="color:#7d867d">' + (state.openRecent ? '−' : '+') + '</span></button>' +
+        (state.recent.length ? '<button class="cx-act" data-act="clearRecent">[清除]</button>' : '') +
+      '</div>' +
+      (state.openRecent ? rows + empty : '');
+  }
+
+  function treeSection() {
+    var acc = state.accent;
+    var h = state.rowH;
+    var rows = flatten(TREE, '', '', []).map(function (r) {
+      if (r.isCur) {
+        return '<button class="cx-cur" data-act="open" data-path="' + esc(r.path) + '" title="' + esc(fullPath(r.path)) + '" style="height:' + h + 'px;background:' + acc + '">' +
+          '<span aria-hidden="true" style="color:rgba(11,12,11,0.45)">' + r.prefix + '</span><span>' + esc(r.name) + '</span>' +
+          '<span style="flex:1"></span><span style="font-weight:400;font-size:11px;color:rgba(11,12,11,0.7)">编辑中</span></button>';
+      }
+      var act = r.isNote ? '' : (r.isDir ? ' data-act="toggle"' : ' data-act="open"');
+      var cls = 'cx-row' + (r.isSel ? ' is-sel' : '');
+      var title = r.isNote ? '' : ' title="' + esc(fullPath(r.path)) + '"';
+      return '<button class="' + cls + '"' + act + ' data-path="' + esc(r.path) + '"' + title + ' style="height:' + h + 'px">' +
+        '<span aria-hidden="true" style="color:#3f4a3f">' + r.prefix + '</span>' +
+        '<span style="color:' + r.fg + ';font-weight:' + r.weight + '">' + esc(r.name) + '</span>' +
+        '<span style="color:#7d867d">' + esc(r.suffix) + '</span></button>';
+    }).join('');
+    return '' +
+      '<div class="cx-sec" style="margin-top:12px">' +
+        '<button class="cx-sec-t" data-act="toggleTree" aria-expanded="' + state.openTree + '"><span># 文件夹</span><span style="color:#7d867d">' + (state.openTree ? '−' : '+') + '</span></button>' +
+        '<button class="cx-act" data-act="collapseAll">[折叠]</button>' +
+        '<span style="font-size:11.5px;color:#7d867d">4 目录 · 5 文件</span>' +
+      '</div>' +
+      (state.openTree ? rows : '');
+  }
+
+  function filterSection(q) {
+    var acc = state.accent;
+    var h = state.rowH;
+    var hits = allFiles(TREE, '', []).filter(function (p) { return baseName(p).toLowerCase().indexOf(q) >= 0; }).slice(0, 60);
+    var rows = hits.map(function (p) {
+      var name = baseName(p);
+      var at = name.toLowerCase().indexOf(q);
+      var cls = 'cx-row' + (p === state.selected && p !== state.current ? ' is-sel' : '');
+      return '<button class="' + cls + '" data-act="open" data-path="' + esc(p) + '" title="' + esc(fullPath(p)) + '" style="height:' + h + 'px;gap:10px">' +
+        '<span style="color:' + typeFg(name, false) + '">' + esc(name.slice(0, at)) +
+        '<span style="background:' + tint(acc, 0.2) + ';color:' + acc + ';border-radius:3px">' + esc(name.slice(at, at + q.length)) + '</span>' +
+        esc(name.slice(at + q.length)) + '</span>' +
+        '<span class="where">' + esc(whereOf(p)) + '</span></button>';
+    }).join('');
+    var none = hits.length ? '' :
+      '<div style="padding:20px 10px;display:flex;flex-direction:column;align-items:flex-start;gap:10px;color:#8b949e">' +
+        '<span>没有文件名包含“' + esc(state.query.trim()) + '”的文件</span>' +
+        '<button class="cx-tb" data-act="clearQuery" style="color:' + acc + '">[清除筛选]</button></div>';
+    return '<div class="cx-sec"><span># 匹配 ' + hits.length + ' 个文件</span></div>' + rows + none;
+  }
+
+  function sidebar() {
+    var acc = state.accent;
+    var q = state.query.trim().toLowerCase();
+    var body = q ? filterSection(q) : recentSection() + treeSection();
+    var foot = state.hint || relPath(state.current);
+    return '' +
+      '<aside aria-label="文件栏" class="island cx-mono">' +
+        '<div style="display:flex;align-items:center;gap:6px;padding:16px 12px 0 16px">' +
+          '<div style="flex:1;min-width:0;display:flex;flex-direction:column;gap:4px" title="' + esc(ROOT) + '">' +
+            '<span style="display:flex;align-items:center;gap:9px"><span style="color:' + acc + ';font-weight:700">❯</span><span style="font-size:14.5px;font-weight:700;color:#eef3ee">Notepad3</span></span>' +
+            '<span style="padding-left:19px;font-size:11.5px;color:#8b949e;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">D:\\可直接运行程序\\</span>' +
+          '</div>' +
+          '<button class="cx-round" aria-label="新建文件" title="新建文件">' + ICON.plus + '</button>' +
+          '<button class="cx-round" aria-label="刷新" title="刷新">' + ICON.refresh + '</button>' +
+        '</div>' +
+        '<div style="padding:14px 12px 6px">' +
+          '<label class="cx-search">' +
+            '<span aria-hidden="true" style="color:' + acc + ';font-weight:700">/</span>' +
+            '<input id="filter" type="text" value="' + esc(state.query) + '" placeholder="筛选文件" aria-label="筛选文件名" autocomplete="off">' +
+            (q ? '<button class="cx-round" data-act="clearQuery" style="width:22px;height:22px;border-radius:11px;background:transparent" aria-label="清除筛选">' + ICON.close + '</button>' : '') +
+          '</label>' +
+        '</div>' +
+        '<div class="cx-scroll" id="sb-scroll" style="flex:1;min-height:0;overflow-y:auto;padding:4px 8px 10px">' + body + '</div>' +
+        '<div style="height:30px;display:flex;align-items:center;gap:8px;padding-right:8px;background:#0f110f;border-top:1px solid #1b201b;font-size:11.5px;flex-shrink:0">' +
+          '<span style="height:30px;display:flex;align-items:center;padding:0 10px 0 16px;background:' + acc + ';color:#0b0c0b;font-weight:700">文件栏</span>' +
+          '<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:' + (state.hint ? '#e6c07b' : '#8b949e') + '">' + esc(foot) + '</span>' +
+          '<button class="cx-tb" title="显示隐藏文件" aria-label="显示隐藏文件">.*</button>' +
+          '<button class="cx-tb" title="排序：名称" aria-label="排序方式">a→z</button>' +
+        '</div>' +
+      '</aside>';
+  }
+
+  function editor(doc) {
+    var hl = doc && doc.kind === 'ini' ? hlIni : (doc && doc.kind === 'c' ? hlC : function (t) { return [[t, '#d4d4d4']]; });
+    var lines = doc ? doc.lines.slice(0, 34) : [''];
+    var nums = lines.map(function (_, i) { return '<div class="ln">' + (i + 1) + '</div>'; }).join('');
+    var code = lines.map(function (t, i) {
+      var parts = hl(t).map(function (p) { return '<span style="color:' + p[1] + '">' + esc(p[0]) + '</span>'; }).join('');
+      return '<div class="ln" style="background:' + (i === 0 ? 'rgba(255,255,255,0.045)' : 'transparent') + '">' + parts + '</div>';
+    }).join('');
+    var empty = doc ? '' : '<div style="position:absolute;left:48px;right:0;top:0;bottom:0;display:flex;align-items:center;justify-content:center;color:#9a9a9a;font-size:12.5px">设计稿只预置了部分文件的内容</div>';
+    return '<main class="editor"><div class="gutter cx-mono" aria-hidden="true">' + nums + '</div><div class="code cx-mono">' + code + '</div>' + empty + '</main>';
+  }
+
+  function view() {
+    var doc = DOCS[state.current];
+    var name = baseName(state.current);
+    var ext = extOf(name);
+    var lang = ext === 'ini' ? 'INI 配置' : (ext === 'h' || ext === 'c' ? 'C/C++' : '纯文本');
+    return controls() +
+      '<div class="cx win">' +
+        chrome(name + ' - Notepad3 : 管理员权限') +
+        '<div style="flex:1;min-height:0;display:flex;gap:8px;padding:2px 8px 8px">' +
+          (state.sidebar ? sidebar() : '') + editor(doc) +
+        '</div>' +
+        '<div style="height:24px;display:flex;align-items:center;gap:18px;padding:0 14px;font-size:11.5px;color:#9aa29a;flex-shrink:0">' +
+          '<span>行 1　列 1</span><span style="flex:1"></span>' +
+          '<span>' + (doc && doc.bom ? 'UTF-8 带签名' : 'UTF-8') + '</span><span>CR+LF</span><span>' + lang + '</span>' +
+        '</div>' +
+      '</div>';
+  }
+
+  var app = document.getElementById('app');
+  function render(keepFilterFocus) {
+    var scroll = document.getElementById('sb-scroll');
+    var top = scroll ? scroll.scrollTop : 0;
+    var input = document.getElementById('filter');
+    var caret = input && keepFilterFocus ? input.selectionStart : null;
+    app.innerHTML = view();
+    var nextScroll = document.getElementById('sb-scroll');
+    if (nextScroll) nextScroll.scrollTop = top;
+    if (keepFilterFocus) {
+      var next = document.getElementById('filter');
+      if (next) { next.focus(); next.setSelectionRange(caret, caret); }
+    }
+  }
+
+  app.addEventListener('click', function (event) {
+    var el = event.target.closest('[data-act]');
+    if (!el) return;
+    var act = el.getAttribute('data-act');
+    var path = el.getAttribute('data-path');
+    if (act === 'open') openFile(path);
+    else if (act === 'toggle') toggleDir(path);
+    else if (act === 'toggleRecent') state.openRecent = !state.openRecent;
+    else if (act === 'toggleTree') state.openTree = !state.openTree;
+    else if (act === 'clearRecent') state.recent = [];
+    else if (act === 'collapseAll') { state.expanded = {}; state.hint = ''; }
+    else if (act === 'clearQuery') state.query = '';
+    else if (act === 'sidebar') state.sidebar = !state.sidebar;
+    else if (act === 'accent') state.accent = el.getAttribute('data-v');
+    else if (act === 'density') state.rowH = Number(el.getAttribute('data-v'));
+    else return;
+    render(false);
+  });
+  app.addEventListener('input', function (event) {
+    if (event.target.id !== 'filter') return;
+    state.query = event.target.value;
+    state.hint = '';
+    render(true);
+  });
+
+  render(false);
+})();
+</script>
+</body>
+</html>
