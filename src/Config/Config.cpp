@@ -1904,7 +1904,28 @@ void LoadSettings()
     GET_BOOL_VALUE_FROM_INISECTION(ShowToolbar, true);
     GET_BOOL_VALUE_FROM_INISECTION(ShowStatusbar, true);
     GET_BOOL_VALUE_FROM_INISECTION(ShowSidebar, false);
-    GET_INT_VALUE_FROM_INISECTION(SidebarWidth, 240, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+    GET_INT_VALUE_FROM_INISECTION(SidebarWidth, 300, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
+    GET_INT_VALUE_FROM_INISECTION(SidebarSortMode, SIDEBAR_SORT_NAME, SIDEBAR_SORT_NAME, SIDEBAR_SORT_MODIFIED);
+    GET_BOOL_VALUE_FROM_INISECTION(SidebarShowHidden, true);
+    GET_BOOL_VALUE_FROM_INISECTION(SidebarRecentCollapsed, false);
+    GET_BOOL_VALUE_FROM_INISECTION(SidebarFoldersCollapsed, false);
+
+    // Read directly from the cache so 32 long paths are not cut to a single-path buffer.
+    // Bound the copied list at a separator, never in the middle of a retained path.
+    LPCWSTR const sidebarRecentHidden = s_INI.GetValue(IniSecSettings, L"SidebarRecentHidden", L"");
+    size_t sidebarHiddenLength = 0;
+    int sidebarHiddenCount = 1;
+    while (sidebarRecentHidden[sidebarHiddenLength]) {
+        if (sidebarRecentHidden[sidebarHiddenLength] == L'|' && ++sidebarHiddenCount > SIDEBAR_MAX_RECENT_HIDDEN) {
+            break;
+        }
+        ++sidebarHiddenLength;
+    }
+    StrgEmpty(Defaults.SidebarRecentHidden, false);
+    StringCchCopyN(StrgWriteAccessBuf(Settings.SidebarRecentHidden, sidebarHiddenLength + 1), sidebarHiddenLength + 1,
+                  sidebarRecentHidden, sidebarHiddenLength);
+    StrgSanitize(Settings.SidebarRecentHidden);
+    StrgFreeExtra(Settings.SidebarRecentHidden, 0);
 
     GET_INT_VALUE_FROM_INISECTION(EncodingDlgSizeX, 340, INT_MIN, INT_MAX);
     GET_INT_VALUE_FROM_INISECTION(EncodingDlgSizeY, 292, INT_MIN, INT_MAX);
@@ -2376,6 +2397,15 @@ static bool _SaveSettings(bool bForceSaveSettings)
     // Keep persisted values in the same logical range used by loading and dragging.
     Settings.SidebarWidth = clampi(Settings.SidebarWidth, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH);
     SAVE_VALUE_IF_NOT_EQ_DEFAULT(Int, SidebarWidth);
+    SAVE_VALUE_IF_NOT_EQ_DEFAULT(Int, SidebarSortMode);
+    SAVE_VALUE_IF_NOT_EQ_DEFAULT(Bool, SidebarShowHidden);
+    SAVE_VALUE_IF_NOT_EQ_DEFAULT(Bool, SidebarRecentCollapsed);
+    SAVE_VALUE_IF_NOT_EQ_DEFAULT(Bool, SidebarFoldersCollapsed);
+    if (StrgIsNotEmpty(Settings.SidebarRecentHidden)) {
+        IniSectionSetString(IniSecSettings, L"SidebarRecentHidden", StrgGet(Settings.SidebarRecentHidden));
+    } else {
+        IniSectionDelete(IniSecSettings, L"SidebarRecentHidden", false);
+    }
 
     SAVE_VALUE_IF_NOT_EQ_DEFAULT(Int, EncodingDlgSizeX);
     SAVE_VALUE_IF_NOT_EQ_DEFAULT(Int, EncodingDlgSizeY);

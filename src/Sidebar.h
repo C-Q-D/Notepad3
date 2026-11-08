@@ -5,6 +5,10 @@
 // Persisted widths use 96-DPI logical pixels; layout may further limit available space.
 enum { SIDEBAR_MIN_WIDTH = 100, SIDEBAR_MAX_WIDTH = 4000 };
 
+// INI values are stable: alphabetical name, extension, then newest modification.
+enum { SIDEBAR_SORT_NAME = 0, SIDEBAR_SORT_EXTENSION = 1, SIDEBAR_SORT_MODIFIED = 2 };
+enum { SIDEBAR_MAX_RECENT_HIDDEN = 32 };
+
 // Create child controls for parent using the configured visibility; root restoration
 // follows startup FileLoad. Return false if either control or subclass fails.
 bool Sidebar_Create(HWND parent);

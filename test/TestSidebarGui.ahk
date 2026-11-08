@@ -218,8 +218,19 @@ try {
     ini := testDir '\Notepad3.ini'
     visible := ReadSetting(ini, 'ShowSidebar')
     Check(visible = '1' || visible = 'true', 'A visibility persisted')
-    Check(ReadSetting(ini, 'SidebarWidth') = '300', 'A width persisted')
+    ; The 300 default may be omitted; restart must still restore the actual width.
+    Check(ReadSetting(ini, 'SidebarWidth', '300') = '300', 'A width persisted')
     Check(StrLower(PersistedSidebarFolder()) = StrLower(testDir '\fixture'), 'A folder persisted')
+    Run('"' testDir '\Notepad3.exe" /n "' testDir '\fixture\a.txt"', testDir, , &testPid)
+    testCreated := RecordProcess(testPid)
+    main := WinWait('ahk_pid ' testPid, , 10)
+    Check(main != 0, 'A restart with saved settings starts')
+    DllCall('SetWindowPos', 'ptr', main, 'ptr', 0, 'int', 80, 'int', 80, 'int', 1100, 'int', 750, 'uint', 0x14)
+    tree := ControlGetHwnd('SysTreeView321', main)
+    dpi := DllCall('GetDpiForWindow', 'ptr', main, 'uint')
+    ControlGetPos(, , &tw, , tree)
+    Check(Abs(tw - 300 * dpi / 96) <= 4, 'A restart restores 300 logical pixel width (actual ' tw ', DPI ' dpi ')')
+    FinishSidebarScenario('A restart')
     if Ord(through) >= Ord('F') && (scenario = 'All' || scenario = 'ShortPath')
         RunShortPathScenario()
     if Ord(through) >= Ord('F') && (scenario = 'All' || scenario = 'OpenFolder')
@@ -602,13 +613,18 @@ TreeText(tree, item) {
     }
 }
 
-; Read the UTF-8 INI written by SimpleIni. Win32 IniRead assumes ANSI or UTF-16.
-ReadSetting(path, key) {
+; Read key from the UTF-8 Settings section of path; Win32 IniRead assumes ANSI or UTF-16.
+; Return its text or the caller's optional defaultValue when the key is omitted.
+; Missing sections and keys without an explicit default remain assertion failures.
+ReadSetting(path, key, defaultValue?) {
     text := FileRead(path, 'UTF-8')
     if !RegExMatch(text, 'ms)^\[Settings\]\R(.*?)(?:^\[|\z)', &section)
         throw Error('Missing Settings section')
-    if !RegExMatch(section[1], 'm)^' key '=([^\r\n]*)', &value)
+    if !RegExMatch(section[1], 'm)^' key '=([^\r\n]*)', &value) {
+        if IsSet(defaultValue)
+            return defaultValue
         throw Error('Missing Settings key: ' key)
+    }
     return value[1]
 }
 

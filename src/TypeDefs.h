@@ -712,6 +712,11 @@ typedef struct SETTINGS_T {
     bool ShowSidebar;
     int  SidebarWidth;       // Logical pixels at 96 DPI.
     HPATHL SidebarFolder;    // Owned path; empty means no folder selected.
+    int  SidebarSortMode;    // Persisted SIDEBAR_SORT_* value.
+    bool SidebarShowHidden;
+    bool SidebarRecentCollapsed;
+    bool SidebarFoldersCollapsed;
+    HSTRINGW SidebarRecentHidden; // Owned, pipe-separated paths; independent of the file MRU.
     int  ToolBarTheme;
     bool DpiScaleToolBar;
     int  EncodingDlgSizeX;
