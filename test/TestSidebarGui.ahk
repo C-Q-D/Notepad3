@@ -248,6 +248,8 @@ try {
         RunShortPathScenario()
     if Ord(through) >= Ord('F') && (scenario = 'All' || scenario = 'OpenFolder')
         RunOpenFolderScenario()
+    if Ord(through) >= Ord('F') && (scenario = 'All' || scenario = 'Recent')
+        RunRecentScenario()
 } catch Error as err {
     FileAppend('FAIL: ' err.Message '`n', logFile)
     exitCode := 1
@@ -554,6 +556,153 @@ RestartToggles() {
     return tree
 }
 
+; Verify MRU display and sidebar-only hiding through real controls and normal
+; restarts. Nonfatal assertions collect independent failures on the old binary.
+; All fixtures and saved history belong to this runner's isolated directory.
+RunRecentScenario() {
+    global testDir, main, testPid, testCreated, themeName, screenshotDirectory
+    global recentFailures := 0
+    ini := testDir '\Notepad3.ini'
+    FileAppend('[fixture]', testDir '\fixture\recent-extra.ini', 'UTF-8')
+    FileDelete(ini)
+    FileAppend('[Settings]`r`nSettingsVersion=5`r`nSaveSettings=1`r`nSaveRecentFiles=1`r`n'
+        'ShowSidebar=1`r`nSidebarWidth=300`r`nSidebarFolder=' testDir '\fixture`r`n'
+        'ReuseWindow=0`r`nSingleFileInstance=0`r`nAutoLoadMRUFile=0`r`n'
+        'WinThemeDarkMode=' (themeName = 'Dark' ? 1 : 2) '`r`n'
+        '[Settings2]`r`nPreferredLanguageLocaleName=en-US`r`n'
+        '[Recent Files]`r`n01="fixture\missing.txt"`r`n02="fixture\b2.txt"`r`n'
+        '03="fixture\b10.txt"`r`n04="fixture\sub\inner.txt"`r`n'
+        '05="fixture\recent-extra.ini"`r`n', ini, 'UTF-8')
+    tree := ResumeRecentScenario(testDir '\fixture\a.txt')
+    RecentAssert(RecentNames(tree) = 'a.txt|b2.txt|b10.txt|inner.txt', 'Recent MRU order skips missing files and limits rows to four')
+    recent := SendMessage(0x110A, 0, 0, tree)
+    ClickTree(tree, recent)
+    RecentWait(() => !(SendMessage(0x1127, recent, 0x20, tree) & 0x20), 'Recent title collapses populated group')
+    ClickTree(tree, recent)
+    RecentWait(() => (SendMessage(0x1127, recent, 0x20, tree) & 0x20) && RecentNames(tree) = 'a.txt|b2.txt|b10.txt|inner.txt', 'Recent title restores rows after expansion')
+    editor := ControlGetHwnd('Scintilla1', main)
+    TypeText(editor, 'recent-save-marker')
+    item := TreeFind(tree, testDir '\fixture\b2.txt', recent)
+    if item
+        ClickTree(tree, item, true)
+    RecentWait(() => InStr(WinGetTitle(main), 'b2.txt'), 'Recent click opens MRU file')
+    RecentAssert(InStr(FileRead(testDir '\fixture\a.txt', 'UTF-8'), 'recent-save-marker'), 'Recent click saves modified current file before switching')
+    item := TreeFind(tree, testDir '\fixture\b10.txt', recent)
+    if item {
+        SendMessage(0x110B, 9, item, tree)
+        ControlFocus(tree)
+        TreeKey(tree, 0x0D)
+    }
+    RecentWait(() => InStr(WinGetTitle(main), 'b10.txt') && RecentNames(tree) = 'b10.txt|b2.txt|a.txt|inner.txt', 'Recent Enter opens and refreshes MRU order')
+    if screenshotDirectory != ''
+        CaptureWindow(main, screenshotDirectory '\sidebar-recent-' StrLower(themeName) '.png')
+    ClickTree(tree, recent, true)
+    RecentWait(() => RecentNames(tree) = 'recent-extra.ini', 'Recent clear hides only displayed four and reveals older history')
+    ClickTree(tree, recent, true)
+    RecentWait(() => RecentNames(tree) = 'Opened files will appear here', 'Recent empty list shows explanatory row')
+    PostMessage(0x111, 41066, 0, , main)
+    WaitUntil(() => !DllCall('IsWindowVisible', 'ptr', tree), 'Recent fixture sidebar hides')
+    PostMessage(0x111, 41066, 0, , main)
+    WaitUntil(() => DllCall('IsWindowVisible', 'ptr', tree), 'Recent fixture sidebar shows')
+    RecentAssert(RecentNames(tree) = 'Opened files will appear here', 'Recent showing sidebar does not reopen hidden current file')
+    ; Do not save the old binary's intentionally dirty document during teardown.
+    SendMessage(2014, 0, 0, editor)
+    FinishSidebarScenario('Recent cleared')
+    hidden := ReadSetting(ini, 'SidebarRecentHidden', '')
+    RecentAssert(InStr(hidden, testDir '\fixture\a.txt') && InStr(hidden, testDir '\fixture\b2.txt')
+        && InStr(hidden, testDir '\fixture\b10.txt') && InStr(hidden, testDir '\fixture\sub\inner.txt')
+        && InStr(hidden, testDir '\fixture\recent-extra.ini') && StrSplit(hidden, '|').Length = 5,
+        'Recent hidden paths persist in pipe-separated INI list')
+    RecentAssert(RecentIniNames(ini) = 'b10.txt|b2.txt|a.txt|missing.txt|inner.txt|recent-extra.ini', 'Recent clear preserves menu MRU history in INI')
+    tree := ResumeRecentScenario()
+    RecentAssert(RecentNames(tree) = 'Opened files will appear here', 'Recent hidden list survives restart')
+    ClickTree(tree, TreeFind(tree, 'b10.txt'))
+    RecentWait(() => InStr(WinGetTitle(main), 'b10.txt') && RecentNames(tree) = 'b10.txt', 'Recent reopening hidden file makes it visible again')
+    FinishSidebarScenario('Recent reopened')
+    RecentAssert(!InStr(ReadSetting(ini, 'SidebarRecentHidden', ''), testDir '\fixture\b10.txt'), 'Recent reopening removes path from persisted hidden list')
+    ; Seed a full hide list, then exercise the real clear action at its capacity.
+    ; Dropping whole oldest entries prevents unbounded growth and partial paths.
+    fullList := ''
+    Loop 32
+        fullList .= (A_Index > 1 ? '|' : '') testDir '\fixture\old-' A_Index '.txt'
+    text := FileRead(ini, 'UTF-8')
+    text := RegExReplace(text, 'm)^SidebarRecentHidden=[^\r\n]*', 'SidebarRecentHidden=' fullList)
+    FileDelete(ini)
+    FileAppend(text, ini, 'UTF-8')
+    tree := ResumeRecentScenario()
+    ClickTree(tree, SendMessage(0x110A, 0, 0, tree), true)
+    RecentWait(() => RecentNames(tree) = 'recent-extra.ini', 'Recent full hide list still hides displayed rows')
+    FinishSidebarScenario('Recent bounded')
+    hidden := ReadSetting(ini, 'SidebarRecentHidden', '')
+    RecentAssert(StrSplit(hidden, '|').Length = 32 && InStr(hidden, testDir '\fixture\b10.txt')
+        && InStr(hidden, testDir '\fixture\old-28.txt') && !InStr(hidden, testDir '\fixture\old-29.txt'),
+        'Recent hide list keeps at most 32 whole paths and evicts oldest')
+    if recentFailures
+        throw Error('Recent independent assertions failed: ' recentFailures)
+}
+
+; Start with the existing isolated INI. An empty file opens an untitled document,
+; so restart tests do not reopen a hidden file as part of their setup.
+ResumeRecentScenario(file := '') {
+    global testDir, main, testPid, testCreated
+    Run('"' testDir '\Notepad3.exe" /n' (file != '' ? ' "' file '"' : ''), testDir, , &testPid)
+    testCreated := RecordProcess(testPid)
+    main := WinWait('ahk_pid ' testPid, , 10)
+    if !main
+        throw Error('Recent instance did not create a main window')
+    DllCall('SetWindowPos', 'ptr', main, 'ptr', 0, 'int', 80, 'int', 80, 'int', 1100, 'int', 750, 'uint', 0x14)
+    tree := ControlGetHwnd('SysTreeView321', main)
+    WaitUntil(() => FolderGroup(tree) != 0, 'Recent fixture directory group starts')
+    return tree
+}
+
+; Return visible recent item basenames in native sibling order, or the empty
+; row's accessible text. No expected ordering is computed from production code.
+RecentNames(tree) {
+    names := ''
+    item := SendMessage(0x110A, 4, SendMessage(0x110A, 0, 0, tree), tree)
+    while item {
+        text := TreeText(tree, item)
+        SplitPath(text, &name)
+        names .= (names != '' ? '|' : '') name
+        item := SendMessage(0x110A, 1, item, tree)
+    }
+    return names
+}
+
+; Read only numbered paths from the real persisted MRU section, excluding its
+; encoding/caret metadata. Preserve the file's order for an independent oracle.
+RecentIniNames(ini) {
+    if !RegExMatch(FileRead(ini, 'UTF-8'), 'ms)^\[Recent Files\]\R(.*?)(?:^\[|\z)', &section)
+        return ''
+    names := ''
+    Loop Parse section[1], '`n', '`r' {
+        if RegExMatch(A_LoopField, '^\d\d="?(.*?)"?$', &entry) {
+            SplitPath(entry[1], &name)
+            names .= (names != '' ? '|' : '') name
+        }
+    }
+    return names
+}
+
+; Log each independent Recent contract failure without hiding subsequent evidence.
+; RunRecentScenario throws after all observations if any assertion failed.
+RecentAssert(pass, name) {
+    global recentFailures, logFile
+    FileAppend((pass ? 'PASS: ' : 'FAIL: ') name '`n', logFile)
+    if !pass
+        recentFailures += 1
+}
+
+; Poll a real control/file observation with a bounded timeout. A timeout records
+; a contract failure and lets the remaining independent observations run.
+RecentWait(condition, name, timeoutMs := 3000) {
+    start := A_TickCount
+    while !condition.Call() && A_TickCount - start < timeoutMs
+        Sleep(25)
+    RecentAssert(condition.Call(), name)
+}
+
 ; Exercise group persistence through real clicks, normal close and fresh startup.
 ; Added fixtures live only in this runner's directory, after B's exact order check.
 RunGroupsScenario() {
@@ -582,7 +731,7 @@ RunGroupsScenario() {
     ClickTree(tree, folders, true)
     WaitUntil(() => SendMessage(0x110A, 4, sub, tree) = 0 && SendMessage(0x110A, 4, second, tree) = 0
         && (SendMessage(0x1127, folders, 0x20, tree) & 0x20), 'Groups collapse all clears both expanded subtrees and keeps group open')
-    ClickTree(tree, SendMessage(0x110A, 0, 0, tree))
+    ClickTree(tree, SendMessage(0x110A, 0, 0, tree), false, true)
     ClickTree(tree, folders)
     WaitUntil(() => !(SendMessage(0x1127, folders, 0x20, tree) & 0x20) && SendMessage(0x110A, 4, folders, tree) = 0, 'Groups title collapses directory group')
     FinishSidebarScenario('Groups collapsed')
@@ -595,7 +744,7 @@ RunGroupsScenario() {
     Check(!(SendMessage(0x1127, folders, 0x20, tree) & 0x20) && SendMessage(0x110A, 4, folders, tree) = 0, 'Groups collapsed state survives startup file synchronization')
     ClickTree(tree, folders)
     WaitUntil(() => (SendMessage(0x1127, folders, 0x20, tree) & 0x20) && TreeFind(tree, 'a.txt') != 0, 'Groups title expands directory group')
-    ClickTree(tree, SendMessage(0x110A, 0, 0, tree))
+    ClickTree(tree, SendMessage(0x110A, 0, 0, tree), false, true)
     FinishSidebarScenario('Groups expanded')
     Check(ReadSetting(ini, 'SidebarFoldersCollapsed', '0') = '0' || ReadSetting(ini, 'SidebarFoldersCollapsed', '0') = 'false', 'Groups expanded INI key is default false')
     Check(ReadSetting(ini, 'SidebarRecentCollapsed', '0') = '0' || ReadSetting(ini, 'SidebarRecentCollapsed', '0') = 'false', 'Groups recent expanded INI key is default false')
@@ -949,7 +1098,9 @@ TreeFind(tree, name, parent := 0) {
 ; Click a row using client-coordinate messages, including its far-right whitespace.
 ; The pointer stays on the user's desktop position throughout this operation.
 ; rowSpace replaces the native expansion button removed by the custom row design.
-ClickTree(tree, item, rowSpace := false) {
+; synchronous is only for nonmodal group actions whose layout must settle before
+; the next row is measured. File activation stays posted so dialogs cannot block.
+ClickTree(tree, item, rowSpace := false, synchronous := false) {
     global testPid
     Check(item != 0, 'target tree item exists')
     SendMessage(0x1114, 0, item, tree)
@@ -963,13 +1114,23 @@ ClickTree(tree, item, rowSpace := false) {
         DllCall('WriteProcessMemory', 'ptr', process, 'ptr', memory, 'ptr', data, 'uptr', 64, 'ptr', 0)
         Check(SendMessage(0x1104, 0, memory, tree), 'target tree rectangle available')
         DllCall('ReadProcessMemory', 'ptr', process, 'ptr', memory, 'ptr', data, 'uptr', 64, 'ptr', 0)
-        ControlGetPos(, , &rowWidth, , tree)
+        ; The full suite adds enough files for a vertical scrollbar. Its outer
+        ; width is not a clickable client coordinate; stay inside the real row.
+        client := Buffer(16, 0)
+        DllCall('GetClientRect', 'ptr', tree, 'ptr', client)
+        rowWidth := NumGet(client, 8, 'int')
         x := rowSpace ? rowWidth - 16 : NumGet(data, 0, 'int') + 10
         y := (NumGet(data, 4, 'int') + NumGet(data, 12, 'int')) // 2
         point := (y << 16) | (x & 0xffff)
-        PostMessage(0x200, 0, point, tree)
-        PostMessage(0x201, 1, point, tree)
-        PostMessage(0x202, 0, point, tree)
+        if synchronous {
+            SendMessage(0x200, 0, point, tree)
+            SendMessage(0x201, 1, point, tree)
+            SendMessage(0x202, 0, point, tree)
+        } else {
+            PostMessage(0x200, 0, point, tree)
+            PostMessage(0x201, 1, point, tree)
+            PostMessage(0x202, 0, point, tree)
+        }
     } finally {
         if memory
             DllCall('VirtualFreeEx', 'ptr', process, 'ptr', memory, 'uptr', 0, 'uint', 0x8000)

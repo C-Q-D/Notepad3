@@ -10,6 +10,7 @@
 #include "MuiLanguage.h"
 #include "Dialogs.h"
 #include "DarkMode/DarkMode.h"
+#include "Config/Config.h"
 
 static HWND s_tree = NULL;
 static HWND s_splitter = NULL;
@@ -27,6 +28,8 @@ static int _Sidebar_Pixels(int logical);
 static HTREEITEM _Sidebar_RowAt(POINT point);
 static void _Sidebar_ActivateRow(HTREEITEM item, POINT point);
 static HTREEITEM s_recent = NULL, s_folders = NULL, s_currentItem = NULL, s_hotItem = NULL, s_pressedItem = NULL;
+static HTREEITEM s_recentCurrentItem = NULL;
+static int s_recentCount = 0;
 static UINT s_rootDirectories = 0, s_rootFiles = 0;
 static bool s_restoreGroupCollapse = false;
 
@@ -145,9 +148,11 @@ static LRESULT CALLBACK _Sidebar_TreeProc(HWND hwnd, UINT message, WPARAM wParam
     return DefSubclassProc(hwnd, message, wParam, lParam);
 }
 
-// Low four bits hold kind/loading state; upper bits store count+1 (zero means
-// uncounted, 1000 means 999+). Tree deletion owns all metadata, without allocations.
+// Low four bits hold kind/loading state; upper bits store directory count+1
+// (zero means uncounted, 1000 means 999+) or a recent row's 1-based number.
+// Tree deletion owns all metadata, without allocations.
 enum { SIDEBAR_FILE = 0, SIDEBAR_UNLOADED = 1, SIDEBAR_LOADED = 2, SIDEBAR_RECENT = 3, SIDEBAR_EMPTY = 4,
+       SIDEBAR_RECENT_ITEM = 5, SIDEBAR_RECENT_EMPTY = 6,
        SIDEBAR_KIND_MASK = 15, SIDEBAR_COUNT_SHIFT = 4, SIDEBAR_COUNT_LIMIT = 1000, SIDEBAR_COUNT_FOLDERS = 256 };
 
 // Read an existing item's name and kind into MAX_PATH_EXPLICIT WCHARs of storage.
@@ -164,13 +169,20 @@ static bool _Sidebar_GetItem(HTREEITEM item, LPWSTR name, LPARAM* kind)
     return found;
 }
 
-// Return an owned path for an item under the directory group, including that
-// group's root path. NULL, presentation-only rows and other groups yield an
-// empty handle; their display text must never become a filesystem component.
+// Return an owned path for a directory-tree item or a recent-file row. The
+// directory group resolves to its root. NULL, presentation-only rows and other
+// groups yield an empty handle; their display text must never become a
+// filesystem component.
 static HPATHL _Sidebar_ItemPath(HTREEITEM item)
 {
     HPATHL result = Path_Allocate(NULL);
     if (!item) {
+        return result;
+    }
+    if (TreeView_GetParent(s_tree, item) == s_recent) {
+        WCHAR name[MAX_PATH_EXPLICIT];
+        LPARAM kind;
+        if (_Sidebar_GetItem(item, name, &kind) && kind == SIDEBAR_RECENT_ITEM) { Path_Reset(result, name); }
         return result;
     }
     HSTRINGW relative = StrgCreate(NULL);
@@ -695,6 +707,118 @@ static HTREEITEM _Sidebar_FindPath(const HPATHL path, bool refreshMissing)
     return parent;
 }
 
+// Match whole canonical paths in the pipe-separated sidebar-only hidden list.
+// file is a nonempty absolute path; no MRU or setting is changed by this query.
+static bool _Sidebar_IsRecentHidden(LPCWSTR file)
+{
+    size_t const length = wcslen(file);
+    for (LPCWSTR part = StrgGet(Settings.SidebarRecentHidden); *part;) {
+        LPCWSTR const end = wcschr(part, L'|');
+        size_t const count = end ? (size_t)(end - part) : wcslen(part);
+        if (count == length && CompareStringOrdinal(part, (int)count, file, (int)length, TRUE) == CSTR_EQUAL) { return true; }
+        if (!end) { break; }
+        part = end + 1;
+    }
+    return false;
+}
+
+// Hide or unhide one canonical nonempty path. New hides go first; keep at most
+// 32 whole entries, dropping the oldest when full. Normal settings save persists
+// the owned string. This deliberately leaves the menu's MRU untouched.
+static void _Sidebar_ChangeRecentHidden(LPCWSTR file, bool hide)
+{
+    HSTRINGW previous = StrgCopy(Settings.SidebarRecentHidden);
+    HSTRINGW replacement = StrgCreate(hide ? file : NULL);
+    unsigned count = hide ? 1 : 0;
+    LPWSTR part = StrgWriteAccessBuf(previous, 0);
+    while (*part && count < SIDEBAR_MAX_RECENT_HIDDEN) {
+        LPWSTR const end = wcschr(part, L'|');
+        if (end) { *end = L'\0'; }
+        if (*part && CompareStringOrdinal(part, -1, file, -1, TRUE) != CSTR_EQUAL) {
+            if (count++) { StrgCat(replacement, L"|"); }
+            StrgCat(replacement, part);
+        }
+        if (!end) { break; }
+        part = end + 1;
+    }
+    StrgSwap(Settings.SidebarRecentHidden, replacement);
+    StrgDestroy(replacement);
+    StrgDestroy(previous);
+}
+
+// Rebuild just the recent children from real MRU order. Paths use the same
+// sanitize/unquote/app-relative expansion as opening recent files. Deleted files
+// and sidebar hides do not consume the four visible slots. Preserve group state.
+static void _Sidebar_RefreshRecent(void)
+{
+    if (!s_tree || (!s_recent && !Settings.ShowSidebar)) { return; }
+    if (!s_recent) {
+        WCHAR title[128];
+        GetLngString(IDS_MUI_SIDEBAR_RECENT_TITLE, title, COUNTOF(title));
+        s_recent = _Sidebar_Insert(TVI_ROOT, title, false);
+        TVITEMW value = { 0 };
+        value.mask = TVIF_PARAM;
+        value.hItem = s_recent;
+        value.lParam = SIDEBAR_RECENT;
+        TreeView_SetItem(s_tree, &value);
+    }
+    bool const selected = TreeView_GetParent(s_tree, TreeView_GetSelection(s_tree)) == s_recent;
+    HPATHL selection = selected ? _Sidebar_ItemPath(TreeView_GetSelection(s_tree)) : NULL;
+    _Sidebar_ClearChildren(s_recent);
+    s_recentCount = 0;
+    for (int i = 0, count = MRU_Count(Globals.pFileMRU); i < count && s_recentCount < 4; ++i) {
+        HPATHL path = Path_Allocate(NULL);
+        LPWSTR const buffer = Path_WriteAccessBuf(path, PATHLONG_MAX_CCH);
+        MRU_Enum(Globals.pFileMRU, i, buffer, (int)Path_GetBufCount(path));
+        Path_Sanitize(path);
+        Path_UnQuoteSpaces(path);
+        Path_AbsoluteFromApp(path, true);
+        if (Path_IsExistingFile(path)) {
+            Path_GetLongPathNameEx(path);
+            if (!_Sidebar_IsRecentHidden(Path_Get(path))) {
+                HTREEITEM const item = _Sidebar_Insert(s_recent, Path_Get(path), false);
+                TVITEMW value = { 0 };
+                value.mask = TVIF_PARAM;
+                value.hItem = item;
+                value.lParam = SIDEBAR_RECENT_ITEM | (++s_recentCount << SIDEBAR_COUNT_SHIFT);
+                TreeView_SetItem(s_tree, &value);
+                if (Path_StrgComparePath(path, Paths.CurrentFile, Paths.WorkingDirectory, true) == 0) { s_recentCurrentItem = item; }
+                if (selection && Path_StrgComparePath(path, selection, Paths.WorkingDirectory, true) == 0) { TreeView_SelectItem(s_tree, item); }
+            }
+        }
+        Path_Release(path);
+    }
+    if (!s_recentCount) {
+        WCHAR empty[256];
+        GetLngString(IDS_MUI_SIDEBAR_RECENT_EMPTY, empty, COUNTOF(empty));
+        TVITEMW value = { 0 };
+        value.mask = TVIF_PARAM;
+        value.hItem = _Sidebar_Insert(s_recent, empty, false);
+        value.lParam = SIDEBAR_RECENT_EMPTY;
+        TreeView_SetItem(s_tree, &value);
+    }
+    TVITEMW group = { 0 };
+    group.mask = TVIF_CHILDREN;
+    group.hItem = s_recent;
+    group.cChildren = 1; // Even the empty-state row is a real child of this group.
+    TreeView_SetItem(s_tree, &group);
+    TreeView_Expand(s_tree, s_recent, Settings.SidebarRecentCollapsed ? TVE_COLLAPSE : TVE_EXPAND);
+    Path_Release(selection);
+    InvalidateRect(s_tree, NULL, FALSE);
+}
+
+// Add only the displayed files to the sidebar hide list, then show older eligible
+// history (or the empty row). Never delete or reorder the shared recent-file MRU.
+static void _Sidebar_ClearRecent(void)
+{
+    for (HTREEITEM item = TreeView_GetChild(s_tree, s_recent); item; item = TreeView_GetNextSibling(s_tree, item)) {
+        WCHAR name[MAX_PATH_EXPLICIT];
+        LPARAM kind;
+        if (_Sidebar_GetItem(item, name, &kind) && kind == SIDEBAR_RECENT_ITEM) { _Sidebar_ChangeRecentHidden(name, true); }
+    }
+    _Sidebar_RefreshRecent();
+}
+
 void Sidebar_SetRoot(const HPATHL folder)
 {
     if (!s_tree) {
@@ -704,6 +828,7 @@ void Sidebar_SetRoot(const HPATHL folder)
     TreeView_DeleteAllItems(s_tree);
     s_recent = s_folders = NULL;
     s_rootDirectories = s_rootFiles = 0;
+    _Sidebar_RefreshRecent();
     if (Path_IsExistingDirectory(normalized)) {
         Path_CanonicalizeEx(normalized, Paths.WorkingDirectory);
         // FileLoad expands 8.3 names too; both roots and item paths must use
@@ -711,15 +836,6 @@ void Sidebar_SetRoot(const HPATHL folder)
         Path_GetLongPathNameEx(normalized);
         Path_Reset(Settings.SidebarFolder, Path_Get(normalized));
         WCHAR title[128];
-        GetLngString(IDS_MUI_SIDEBAR_RECENT_TITLE, title, COUNTOF(title));
-        s_recent = _Sidebar_Insert(TVI_ROOT, title, false);
-        TVITEMW recent = { 0 };
-        recent.mask = TVIF_PARAM | TVIF_STATE;
-        recent.hItem = s_recent;
-        recent.lParam = SIDEBAR_RECENT;
-        recent.stateMask = TVIS_EXPANDED;
-        recent.state = Settings.SidebarRecentCollapsed ? 0 : TVIS_EXPANDED;
-        TreeView_SetItem(s_tree, &recent);
         GetLngString(IDS_MUI_SIDEBAR_FOLDERS_TITLE, title, COUNTOF(title));
         s_folders = _Sidebar_Insert(TVI_ROOT, title, true);
         s_restoreGroupCollapse = Settings.SidebarFoldersCollapsed;
@@ -732,9 +848,11 @@ void Sidebar_SetRoot(const HPATHL folder)
     _Sidebar_UpdateChrome();
 }
 
-void Sidebar_SyncToFile(const HPATHL file)
+void Sidebar_SyncToFile(const HPATHL file, bool fileOpened)
 {
     if (s_panel) { InvalidateRect(s_panel, NULL, FALSE); }
+    if (fileOpened && Path_IsNotEmpty(file) && _Sidebar_IsRecentHidden(Path_Get(file))) { _Sidebar_ChangeRecentHidden(Path_Get(file), false); }
+    _Sidebar_RefreshRecent();
     if (!s_tree || !Settings.ShowSidebar || !s_folders) {
         return;
     }
@@ -849,7 +967,7 @@ static bool _Sidebar_OpenFile(const HPATHL target)
         loaded = FileLoad(target, flags, 0, 0);
     }
 sync:
-    Sidebar_SyncToFile(Paths.CurrentFile);
+    Sidebar_SyncToFile(Paths.CurrentFile, same);
     RESET_FCT_GUARD()
     return loaded;
 }
@@ -887,6 +1005,17 @@ static RECT _Sidebar_CollapseRect(HDC dc, RECT row)
     return row;
 }
 
+// Match the clear action's drawn width at the right edge of the recent header.
+// dc and row use tree-client pixels; callers release their borrowed DC.
+static RECT _Sidebar_RecentClearRect(HDC dc, RECT row)
+{
+    WCHAR text[128];
+    GetLngString(IDS_MUI_SIDEBAR_CLEAR_RECENT, text, COUNTOF(text));
+    row.right -= _Sidebar_Pixels(10);
+    row.left = max_i(_Sidebar_Pixels(10), row.right - SidebarDrawing_Measure(dc, s_drawing, text, SidebarFontSmall));
+    return row;
+}
+
 // Collapse each top-level directory, retaining the group itself. Lazy reset
 // discards all descendants at once, so this does not recurse down deep paths.
 static void _Sidebar_CollapseAll(HTREEITEM parent)
@@ -909,13 +1038,18 @@ static void _Sidebar_ActivateRow(HTREEITEM item, POINT point)
     LPARAM kind;
     if (!_Sidebar_GetItem(item, name, &kind)) { return; }
     if (item == s_recent) {
+        if (point.x >= 0 && s_recentCount) {
+            RECT row, client;
+            TreeView_GetItemRect(s_tree, item, &row, FALSE);
+            GetClientRect(s_tree, &client);
+            row.right = client.right;
+            HDC dc = GetDC(s_tree);
+            RECT const action = _Sidebar_RecentClearRect(dc, row);
+            ReleaseDC(s_tree, dc);
+            if (PtInRect(&action, point)) { _Sidebar_ClearRecent(); return; }
+        }
         Settings.SidebarRecentCollapsed = !Settings.SidebarRecentCollapsed;
-        TVITEMW state = { 0 };
-        state.mask = TVIF_STATE;
-        state.hItem = item;
-        state.stateMask = TVIS_EXPANDED;
-        state.state = Settings.SidebarRecentCollapsed ? 0 : TVIS_EXPANDED;
-        TreeView_SetItem(s_tree, &state);
+        TreeView_Expand(s_tree, item, Settings.SidebarRecentCollapsed ? TVE_COLLAPSE : TVE_EXPAND);
     } else if (item == s_folders && point.x >= 0) {
         RECT row;
         TreeView_GetItemRect(s_tree, item, &row, FALSE);
@@ -928,7 +1062,7 @@ static void _Sidebar_ActivateRow(HTREEITEM item, POINT point)
         if (PtInRect(&action, point)) { _Sidebar_CollapseAll(s_folders); }
         else if (TreeView_GetItemState(s_tree, item, TVIS_EXPANDED) & TVIS_EXPANDED) { _Sidebar_CollapseDirectory(item); }
         else if (kind != SIDEBAR_UNLOADED || _Sidebar_LoadChildren(item)) { TreeView_Expand(s_tree, item, TVE_EXPAND); }
-    } else if (kind == SIDEBAR_FILE) {
+    } else if (kind == SIDEBAR_FILE || kind == SIDEBAR_RECENT_ITEM) {
         HPATHL path = _Sidebar_ItemPath(item);
         _Sidebar_OpenFile(path);
         Path_Release(path);
@@ -937,6 +1071,56 @@ static void _Sidebar_ActivateRow(HTREEITEM item, POINT point)
         else if (kind != SIDEBAR_UNLOADED || _Sidebar_LoadChildren(item)) { TreeView_Expand(s_tree, item, TVE_EXPAND); }
     }
     InvalidateRect(s_tree, NULL, FALSE);
+}
+
+// Use one extension palette for tree files and recent rows; directory and
+// current-file styles are applied by the respective row renderer.
+static COLORREF _Sidebar_FileColor(LPCWSTR name)
+{
+    if (_Sidebar_IsBinary(name)) { return s_palette->binary; }
+    if (!_wcsicmp(PathFindExtensionW(name), L".ini")) { return s_palette->ini; }
+    if (!_wcsicmp(PathFindExtensionW(name), L".h") || !_wcsicmp(PathFindExtensionW(name), L".c")) { return s_palette->source; }
+    return s_palette->text;
+}
+
+// Draw a recent file as an aligned numbered row, without the tree's current-file
+// capsule. name is its canonical path; text is the clipped tree-client bounds.
+// The cached current handle avoids filesystem/path work for current-file checks.
+static void _Sidebar_DrawRecentRow(HDC dc, HTREEITEM item, LPCWSTR name, RECT text)
+{
+    SidebarPalette const* p = s_palette;
+    bool const current = item == s_recentCurrentItem;
+    RECT marker = text;
+    marker.right = marker.left + _Sidebar_Pixels(10);
+    if (current) { SidebarDrawing_Text(dc, s_drawing, L"\x25B8", SidebarFontBody, marker, p->accent); }
+    TVITEMW value = { 0 };
+    value.mask = TVIF_PARAM;
+    value.hItem = item;
+    TreeView_GetItem(s_tree, &value);
+    WCHAR number[16];
+    StringCchPrintf(number, COUNTOF(number), L"%u", (unsigned)(value.lParam >> SIDEBAR_COUNT_SHIFT));
+    RECT index = text;
+    index.left = marker.right + _Sidebar_Pixels(10);
+    index.right = index.left + SidebarDrawing_Measure(dc, s_drawing, L"4", SidebarFontBody);
+    SidebarDrawing_Text(dc, s_drawing, number, SidebarFontBody, index, p->weak);
+    text.left = index.right + _Sidebar_Pixels(10);
+    RECT client;
+    GetClientRect(s_panel, &client);
+    if (_Sidebar_WidthTier(MulDiv(client.right, 96, s_dpi)) == 0) {
+        HPATHL folder = Path_Allocate(name);
+        Path_RemoveFileSpec(folder);
+        WCHAR where[MAX_PATH_EXPLICIT];
+        if (_Sidebar_AbbreviateFolder(Path_Get(Settings.SidebarFolder), Path_Get(folder), where, COUNTOF(where))) {
+            RECT column = text;
+            int const available = max_i(0, text.right - text.left);
+            column.left = text.right - min_i(available / 2, SidebarDrawing_Measure(dc, s_drawing, where, SidebarFontSmall));
+            SidebarDrawing_Text(dc, s_drawing, where, SidebarFontSmall, column, p->weak);
+            text.right = max_i(text.left, column.left - _Sidebar_Pixels(10));
+        }
+        Path_Release(folder);
+    }
+    SidebarDrawing_Text(dc, s_drawing, PathFindFileNameW(name), current ? SidebarFontBold : SidebarFontBody,
+                        text, current ? p->accent : _Sidebar_FileColor(name));
 }
 
 // Paint one complete row using cached metadata only. Names remain native item
@@ -974,7 +1158,11 @@ static void _Sidebar_DrawRow(NMTVCUSTOMDRAW* draw)
         bool const collapsed = item == s_recent ? Settings.SidebarRecentCollapsed : !expanded;
         StringCchPrintf(title, COUNTOF(title), L"%s  %s", name, collapsed ? L"+" : L"\x2212");
         SidebarDrawing_Text(dc, s_drawing, title, SidebarFontSmall, text, p->secondary);
-        if (item == s_folders) {
+        if (item == s_recent && item == s_hotItem && s_recentCount) {
+            WCHAR clear[128];
+            GetLngString(IDS_MUI_SIDEBAR_CLEAR_RECENT, clear, COUNTOF(clear));
+            SidebarDrawing_Text(dc, s_drawing, clear, SidebarFontSmall, _Sidebar_RecentClearRect(dc, row), p->accent);
+        } else if (item == s_folders) {
             WCHAR right[128];
             if (item == s_hotItem) { GetLngString(IDS_MUI_SIDEBAR_COLLAPSE_ALL, right, COUNTOF(right)); }
             else {
@@ -989,6 +1177,10 @@ static void _Sidebar_DrawRow(NMTVCUSTOMDRAW* draw)
             }
             SidebarDrawing_Text(dc, s_drawing, right, SidebarFontSmall, text, item == s_hotItem ? p->accent : p->weak);
         }
+    } else if (kind == SIDEBAR_RECENT_ITEM) {
+        _Sidebar_DrawRecentRow(dc, item, name, text);
+    } else if (kind == SIDEBAR_RECENT_EMPTY) {
+        SidebarDrawing_Text(dc, s_drawing, name, SidebarFontBody, text, p->secondary);
     } else {
         // The 32768-character Windows path limit bounds depth as well. Allocate
         // only while drawing the row; no per-node path/prefix copies are retained.
@@ -1014,13 +1206,10 @@ static void _Sidebar_DrawRow(NMTVCUSTOMDRAW* draw)
         }
         FreeMem(prefix);
         FreeMem(ancestors);
-        COLORREF color = p->text;
+        COLORREF color = _Sidebar_FileColor(name);
         bool const directory = kind == SIDEBAR_UNLOADED || kind == SIDEBAR_LOADED;
         if (directory) { color = p->folder; }
         else if (kind == SIDEBAR_EMPTY) { color = p->weak; }
-        else if (_Sidebar_IsBinary(name)) { color = p->binary; }
-        else if (!_wcsicmp(PathFindExtensionW(name), L".ini")) { color = p->ini; }
-        else if (!_wcsicmp(PathFindExtensionW(name), L".h") || !_wcsicmp(PathFindExtensionW(name), L".c")) { color = p->source; }
         if (current) {
             WCHAR editing[128];
             GetLngString(IDS_MUI_SIDEBAR_EDITING, editing, COUNTOF(editing));
@@ -1069,6 +1258,7 @@ static LRESULT _Sidebar_OnNotify(const NMHDR* notification)
     } else if (notification->code == TVN_DELETEITEMW) {
         HTREEITEM const item = ((NMTREEVIEWW const*)notification)->itemOld.hItem;
         if (s_currentItem == item) { s_currentItem = NULL; }
+        if (s_recentCurrentItem == item) { s_recentCurrentItem = NULL; }
         if (s_hotItem == item) { s_hotItem = NULL; }
         if (s_pressedItem == item) { s_pressedItem = NULL; }
     } else if (notification->code == TVN_ITEMEXPANDINGW) {
@@ -1078,6 +1268,10 @@ static LRESULT _Sidebar_OnNotify(const NMHDR* notification)
         }
     } else if (notification->code == TVN_ITEMEXPANDEDW) {
         NMTREEVIEWW const* event = (NMTREEVIEWW const*)notification;
+        if (event->itemNew.hItem == s_recent) {
+            Settings.SidebarRecentCollapsed = !(event->action & TVE_EXPAND);
+            return 0;
+        }
         if (event->itemNew.hItem == s_folders) { Settings.SidebarFoldersCollapsed = !(event->action & TVE_EXPAND); }
         if (event->action == TVE_COLLAPSE) {
             _Sidebar_CollapseDirectory(event->itemNew.hItem);
@@ -1489,7 +1683,7 @@ void Sidebar_Show(bool visible)
         Sidebar_SetRoot(Settings.SidebarFolder);
     }
     if (visible) {
-        Sidebar_SyncToFile(Paths.CurrentFile);
+        Sidebar_SyncToFile(Paths.CurrentFile, false);
     }
     ShowWindow(s_panel, visible ? SW_SHOWNA : SW_HIDE);
     ShowWindow(s_splitter, visible ? SW_SHOWNA : SW_HIDE);

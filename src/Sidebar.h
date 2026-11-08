@@ -24,13 +24,16 @@ void Sidebar_Layout(RECT* available);
 // theme/DPI changes. Safe before creation; never installs another tree subclass.
 void Sidebar_OnThemeChanged(void);
 // Replace the groups with folder (non-null path handle) as the directory group's
-// path anchor. Missing folders yield an empty tree without a dialog. On success
+// path anchor. Missing folders retain the recent group without a dialog. On success
 // persist the canonical long-name root and restore both group collapse settings.
 void Sidebar_SetRoot(const HPATHL folder);
 // Select and reveal file within the root; clear selection outside it or when empty.
 // A missing entry in an already loaded parent triggers a local re-enumeration.
 // The first sync after rebuilding honors the persisted directory-group collapse.
-void Sidebar_SyncToFile(const HPATHL file);
+// Refresh recent files independently of the root and visibility. fileOpened is
+// true only for a successful open/explicit same-file activation: remove that
+// nonempty file from sidebar hides. Layout, saves and root changes pass false.
+void Sidebar_SyncToFile(const HPATHL file, bool fileOpened);
 // Re-enumerate the root and restore expanded paths and selection where they exist.
 void Sidebar_Refresh(void);
 // Consume unmodified tree keyboard messages before main accelerators can turn

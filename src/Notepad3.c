@@ -2661,7 +2661,7 @@ LRESULT CALLBACK MainWndProc(HWND hwnd, UINT umsg, WPARAM wParam, LPARAM lParam)
     case WM_SIDEBAR_RESTORE:
         if (Settings.ShowSidebar && Path_IsExistingDirectory(Settings.SidebarFolder)) {
             Sidebar_SetRoot(Settings.SidebarFolder);
-            Sidebar_SyncToFile(Paths.CurrentFile);
+            Sidebar_SyncToFile(Paths.CurrentFile, false);
         }
         return 0;
 
@@ -5583,7 +5583,7 @@ static bool _HandleFileCommands(HWND hwnd, UINT umsg, WPARAM wParam, LPARAM lPar
             Settings.ShowSidebar = true;
             Sidebar_SetRoot(folder);
             Sidebar_Show(true);
-            Sidebar_SyncToFile(Paths.CurrentFile);
+            Sidebar_SyncToFile(Paths.CurrentFile, false);
             UpdateUI(hwnd);
         }
         Path_Release(folder);
@@ -12320,7 +12320,7 @@ bool FileLoad(const HPATHL hfile_pth, const FileLoadFlags fLoadFlags, const DocP
             ShowZoomCallTip();
         }
 
-        Sidebar_SyncToFile(Paths.CurrentFile);
+        Sidebar_SyncToFile(Paths.CurrentFile, false);
         return true;
     }
 
@@ -12579,7 +12579,7 @@ bool FileLoad(const HPATHL hfile_pth, const FileLoadFlags fLoadFlags, const DocP
     UpdateToolbar_Now(Globals.hwndMain);
 
     if (fSuccess) {
-        Sidebar_SyncToFile(Paths.CurrentFile);
+        Sidebar_SyncToFile(Paths.CurrentFile, true);
     }
     return fSuccess;
 }
@@ -13012,7 +13012,7 @@ bool FileSave(FileSaveFlags fSaveFlags)
     if (fSuccess) {
         AutoSaveStop();
         ResetFileObservationData(true);
-        Sidebar_SyncToFile(Paths.CurrentFile);
+        Sidebar_SyncToFile(Paths.CurrentFile, false);
     }
 
     UpdateToolbar();
