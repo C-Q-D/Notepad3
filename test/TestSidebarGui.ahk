@@ -256,8 +256,12 @@ try {
         RunFilterScenario()
     if Ord(through) >= Ord('F') && (scenario = 'All' || scenario = 'Edges')
         RunEdgesScenario()
+    if Ord(through) >= Ord('F') && (scenario = 'All' || scenario = 'Rework')
+        RunReworkScenario()
+    if Ord(through) >= Ord('F') && (scenario = 'All' || scenario = 'Rework2')
+        RunRework2Scenario()
 } catch Error as err {
-    FileAppend('FAIL: ' err.Message '`n', logFile)
+    FileAppend('FAIL: ' err.Message ' [' err.What ', line ' err.Line ']`n', logFile)
     exitCode := 1
 } finally {
     if main && WinExist(main) {
@@ -266,6 +270,247 @@ try {
     }
 }
 ExitApp(exitCode)
+
+; Refresh must preserve a keyboard-selected recent file independently of root
+; availability. Each action starts with that row selected, not the current file.
+RunRework2Scenario() {
+    global testDir, edgesFailures := 0
+    target := testDir '\boundary-recent.txt'
+    FileAppend('existing recent document', target, 'UTF-8')
+    Rework2BoundaryRecent('unset', '', target)
+    Rework2BoundaryRecent('missing', testDir '\boundary-missing', target)
+    Rework2BoundaryRecent('deleted', testDir '\boundary-deleted', target)
+    if edgesFailures
+        throw Error('Rework2 contract failures: ' edgesFailures)
+}
+
+; Start an isolated root state and exercise all four shared refresh entry points.
+; For deleted roots, restore the directory before each fresh deletion so every
+; action crosses READY to MISSING rather than only refreshing a cached boundary.
+Rework2BoundaryRecent(state, root, target) {
+    global testDir, main
+    probe := testDir '\refresh-probe-' state '.txt'
+    FileAppend('completion probe', probe, 'UTF-8')
+    if state = 'deleted'
+        DirCreate(root)
+    WriteRecentReworkIni(target, 0, probe)
+    IniWrite(root, testDir '\Notepad3.ini', 'Settings', 'SidebarFolder')
+    tree := ResumeRecentScenario(testDir '\fixture\a.txt')
+    panel := DllCall('GetParent', 'ptr', tree, 'ptr')
+    editor := ControlGetHwnd('Scintilla1', main)
+    before := EditorText(editor)
+    for index, action in ['F5', 'Refresh', 'Hidden', 'Sort'] {
+        if index > 1 {
+            FileAppend('completion probe', probe, 'UTF-8')
+            if state = 'deleted'
+                DirCreate(root)
+            ClickSidebarAction(tree, 'Refresh')
+            WaitUntil(() => TreeFind(tree, probe, SendMessage(0x110A, 0, 0, tree)) != 0, 'Rework2 refresh fixture restores completion probe')
+        }
+        recent := SendMessage(0x110A, 0, 0, tree)
+        Check(TreeFind(tree, target, recent) != 0, 'Rework2 existing recent fixture is listed')
+        SendMessage(0x110B, 9, recent, tree)
+        ControlFocus(tree)
+        TreeKey(tree, 0x28)
+        TreeKey(tree, 0x28)
+        WaitUntil(() => TreeText(tree, SendMessage(0x110A, 9, 0, tree), 32768) = target, 'Rework2 keyboard selects non-current recent file')
+        FileDelete(probe)
+        if state = 'deleted'
+            DirDelete(root)
+        if action = 'F5'
+            TreeKey(tree, 0x74)
+        else if action = 'Refresh'
+            ClickSidebarAction(tree, 'Refresh')
+        else
+            ClickFooter(panel, action = 'Sort')
+        ; Removal of a separate MRU probe proves the posted refresh ran. It
+        ; cannot pass by observing the still-selected row before the command.
+        WaitUntil(() => TreeFind(tree, probe, SendMessage(0x110A, 0, 0, tree)) = 0, 'Rework2 refresh removes missing completion probe')
+        EdgesWait(() => Rework2RecentSelected(tree, target) && EditorText(editor) = before, 'R2 ' state ' ' action ' preserves keyboard-selected existing recent file')
+    }
+    FinishSidebarScenario('Rework2 ' state)
+}
+
+; Verify path, owning group and continued existence using the rebuilt tree.
+; A selection in the folder group or a deleted recent target is not success.
+Rework2RecentSelected(tree, path) {
+    selected := SendMessage(0x110A, 9, 0, tree)
+    return FileExist(path) && TreeText(tree, selected, 32768) = path && SendMessage(0x110A, 3, selected, tree) = SendMessage(0x110A, 0, 0, tree)
+}
+
+; Exercise shared actions across the visible results, recent group and root states.
+; Independent observations continue on the old executable to retain failure evidence.
+RunReworkScenario() {
+    global testDir, main, testPid, logFile, edgesFailures := 0
+    folder := testDir '\rework'
+    DirCreate(folder '\A')
+    DirCreate(folder '\B')
+    FileAppend('start document', folder '\start.txt', 'UTF-8')
+    FileAppend('target document', folder '\B\target.txt', 'UTF-8')
+    FileAppend('binary data', folder '\B\target.bin', 'UTF-8')
+    tree := StartSidebarScenario(folder, 1, folder '\start.txt')
+    panel := DllCall('GetParent', 'ptr', tree, 'ptr')
+    filter := ControlGetHwnd('Edit1', panel)
+    results := ControlGetHwnd('SysTreeView322', main)
+    editor := ControlGetHwnd('Scintilla1', main)
+    ClickTree(tree, TreeFind(tree, 'A'), false, true)
+    ControlSetText('target.txt', filter)
+    WaitUntil(() => FilterFind(results, 'target.txt') != 0, 'Rework filter fixture finds text result')
+    SendMessage(0x110B, 9, FilterFind(results, 'target.txt'), results)
+    ReworkCreate(tree, 'selected.txt')
+    EdgesAssert(FileExist(folder '\B\selected.txt') && !FileExist(folder '\A\selected.txt'), 'F1 selected result creates in visible result parent')
+    ClickTree(results, FilterFind(results, 'target.txt'))
+    WaitUntil(() => EditorText(editor) = 'target document', 'Rework filter opens target')
+    ReworkCreate(tree, 'opened.txt')
+    EdgesAssert(FileExist(folder '\B\opened.txt') && !FileExist(folder '\A\opened.txt'), 'F1 opened result creates in visible result parent')
+    for name in ['# Matches: 1', '[Clear filter]'] {
+        if name = '[Clear filter]'
+            ControlSetText('no-such-result', filter)
+        WaitUntil(FilterFind.Bind(results, name), 'Rework selects actual result row: ' name)
+        SendMessage(0x110B, 9, FilterFind(results, name), results)
+        created := name = '[Clear filter]' ? 'clear-row.txt' : 'header-row.txt'
+        ReworkCreate(tree, created)
+        EdgesAssert(FileExist(folder '\' created) && !FileExist(folder '\A\' created), 'F1 pathless result ' name ' falls back to root')
+    }
+    ControlSetText('no-such-result', filter)
+    WaitUntil(() => FilterFind(results, '[Clear filter]') != 0, 'Rework no-result fixture settles')
+    empty := FilterFind(results, 'No file name contains “no-such-result”')
+    Check(empty != 0, 'Rework selects actual empty result hint')
+    SendMessage(0x110B, 9, empty, results)
+    ReworkCreate(tree, 'empty-row.txt')
+    EdgesAssert(FileExist(folder '\empty-row.txt') && !FileExist(folder '\A\empty-row.txt'), 'F1 empty result falls back to root')
+    ControlSetText('target.bin', filter)
+    WaitUntil(() => FilterFind(results, 'target.bin') != 0, 'Rework binary result appears')
+    before := EditorText(editor)
+    ClickTree(results, FilterFind(results, 'target.bin'))
+    EdgesWait(() => ControlGetText(panel) = 'Binary file; cannot open in the editor' && EditorText(editor) = before, 'F5 binary result click preserves document and reports hint')
+    ControlSetText('target.bi', filter)
+    WaitUntil(() => FilterFind(results, 'target.bin') != 0 && ControlGetText(panel) = '', 'Rework clears prior binary hint')
+    SendMessage(0x110B, 9, FilterFind(results, 'target.bin'), results)
+    ControlFocus(results)
+    TreeKey(results, 0x0D)
+    EdgesWait(() => ControlGetText(panel) = 'Binary file; cannot open in the editor' && EditorText(editor) = before, 'F5 binary result Enter preserves document and reports hint')
+    ; Match the native drawing fixture with a real scan of a long parent path.
+    longFolder := folder
+    Loop 3
+        longFolder .= '\' StrReplace(Format('{:0100}', A_Index), '0', 'y')
+    DirCreate('\\?\' longFolder)
+    FileAppend('deep result', '\\?\' longFolder '\deep-result.txt', 'UTF-8')
+    ControlSetText('deep-result', filter)
+    WaitUntil(() => FilterFind(results, 'deep-result.txt') != 0, 'Rework long relative folder scan reaches renderer fixture')
+    FinishSidebarScenario('Rework results')
+
+    outside := testDir '\outside-rework.txt'
+    FileAppend('outside', outside, 'UTF-8')
+    WriteRecentReworkIni(folder '\B\target.txt', 0, outside)
+    IniWrite(folder, testDir '\Notepad3.ini', 'Settings', 'SidebarFolder')
+    tree := ResumeRecentScenario(folder '\start.txt')
+    panel := DllCall('GetParent', 'ptr', tree, 'ptr')
+    for path in [folder '\B\target.txt', outside] {
+        recent := SendMessage(0x110A, 0, 0, tree)
+        SendMessage(0x110B, 9, TreeFind(tree, path, recent), tree)
+        for action in ['F5', 'Refresh', 'Hidden', 'Sort'] {
+            SendMessage(0x1102, 1, TreeFind(tree, 'B'), tree)
+            SendMessage(0x110B, 9, TreeFind(tree, path, SendMessage(0x110A, 0, 0, tree)), tree)
+            if action = 'F5' {
+                ControlFocus(tree)
+                TreeKey(tree, 0x74)
+            } else if action = 'Refresh'
+                ClickSidebarAction(tree, 'Refresh')
+            else
+                ClickFooter(panel, action = 'Sort')
+            Sleep(150)
+            selected := SendMessage(0x110A, 9, 0, tree)
+            EdgesAssert(TreeText(tree, selected, 32768) = path && SendMessage(0x110A, 3, selected, tree) = SendMessage(0x110A, 0, 0, tree) && !(SendMessage(0x1127, TreeFind(tree, 'B'), 0x20, tree) & 0x20), 'F4 ' action ' preserves recent selection and collapsed folder: ' (path = outside ? 'outside' : 'inside'))
+        }
+    }
+    DragWidth(panel, 100)
+    recent := SendMessage(0x110A, 0, 0, tree)
+    beforeNames := RecentNames(tree)
+    ClickTree(tree, recent, true, true)
+    EdgesAssert(!(SendMessage(0x1127, recent, 0x20, tree) & 0x20) && RecentNames(tree) = beforeNames, 'F3 narrow hovered recent title collapses without clearing history')
+    ClickTree(tree, recent, true, true)
+    EdgesAssert((SendMessage(0x1127, recent, 0x20, tree) & 0x20) && RecentNames(tree) = beforeNames, 'F3 narrow hovered recent title expands without clearing history')
+    FinishSidebarScenario('Rework recent')
+
+    missing := testDir '\root-state'
+    DirCreate(missing)
+    tree := StartSidebarScenario(missing, 1, folder '\start.txt')
+    panel := DllCall('GetParent', 'ptr', tree, 'ptr')
+    DragWidth(panel, 301)
+    EdgesAssert(ReworkNewTooltip(panel), 'F7 normal root exposes New tooltip region')
+    DirDelete(missing)
+    ClickSidebarAction(tree, 'Refresh')
+    WaitUntil(() => InStr(ControlGetText(panel), 'Folder does not exist:') = 1, 'Rework deleted root enters missing state')
+    EdgesAssert(!ReworkNewTooltip(panel), 'F7 deleted root removes New tooltip without resize')
+    ; Establish the disabled geometry, then retry without another resize. This
+    ; independently catches a stale empty rectangle during recovery as well.
+    DragWidth(panel, 300)
+    DirCreate(missing)
+    recovery := SendMessage(0x110A, 1, SendMessage(0x110A, 4, FolderGroup(tree), tree), tree)
+    SendMessage(0x110B, 9, recovery, tree)
+    ControlFocus(tree)
+    TreeKey(tree, 0x0D)
+    WaitUntil(() => ControlGetText(panel) = '', 'Rework retry restores root')
+    EdgesAssert(ReworkNewTooltip(panel), 'F7 retry restores New tooltip without resize')
+    FinishSidebarScenario('Rework root state')
+    longRoot := testDir
+    Loop 4
+        longRoot .= '\' StrReplace(Format('{:080}', A_Index), '0', 'x')
+    tree := StartSidebarScenario(longRoot, 1, folder '\start.txt')
+    panel := DllCall('GetParent', 'ptr', tree, 'ptr')
+    EdgesWait(() => ControlGetText(panel) = 'Folder does not exist: ' longRoot, 'F6 missing long root retains complete status text')
+    FinishSidebarScenario('Rework long root')
+    if edgesFailures
+        throw Error('Rework contract failures: ' edgesFailures)
+}
+
+; Complete a real create dialog and wait for its synchronous file operation.
+ReworkCreate(tree, name) {
+    dialog := OpenCreateDialog(tree)
+    ControlSetText(name, ControlGetHwnd('Edit1', dialog))
+    CreateDialogKey(dialog, 0x0D)
+    Check(WinWaitClose(dialog, , 3), 'Rework create dialog completes: ' name)
+    Sleep(350)
+}
+
+; Query the actual tooltip's tool 4 rectangle in the owning process. No resize,
+; synthetic notification or production hook supplies the observed availability.
+ReworkNewTooltip(panel) {
+    global testPid
+    previous := A_DetectHiddenWindows
+    DetectHiddenWindows(true)
+    tooltip := 0
+    for window in WinGetList('ahk_class tooltips_class32 ahk_pid ' testPid) {
+        if SendMessage(0x40D, 0, 0, window) = 5 {
+            tooltip := window
+            break
+        }
+    }
+    if !tooltip
+        throw Error('Rework sidebar tooltip not found')
+    process := DllCall('OpenProcess', 'uint', 0x438, 'int', false, 'uint', testPid, 'ptr')
+    memory := DllCall('VirtualAllocEx', 'ptr', process, 'ptr', 0, 'uptr', 72, 'uint', 0x3000, 'uint', 4, 'ptr')
+    try {
+        if !process || !memory
+            throw Error('Rework tooltip buffer allocation failed')
+        tool := Buffer(72, 0)
+        NumPut('uint', 72, tool, 0)
+        NumPut('ptr', panel, tool, 8)
+        NumPut('uptr', 4, tool, 16)
+        DllCall('WriteProcessMemory', 'ptr', process, 'ptr', memory, 'ptr', tool, 'uptr', 72, 'ptr', 0)
+        if !SendMessage(0x435, 0, memory, tooltip)
+            throw Error('Rework tooltip tool 4 query failed')
+        DllCall('ReadProcessMemory', 'ptr', process, 'ptr', memory, 'ptr', tool, 'uptr', 72, 'ptr', 0)
+        return NumGet(tool, 32, 'int') > NumGet(tool, 24, 'int') && NumGet(tool, 36, 'int') > NumGet(tool, 28, 'int')
+    } finally {
+        DetectHiddenWindows(previous)
+        if memory
+            DllCall('VirtualFreeEx', 'ptr', process, 'ptr', memory, 'uptr', 0, 'uint', 0x8000)
+        if process
+            DllCall('CloseHandle', 'ptr', process)
+    }
+}
 
 ; Exercise T6 with real activation, footer clicks, INI and fresh processes.
 ; The fixtures specify natural names, different extensions and fixed timestamps.
@@ -550,6 +795,9 @@ RunEdgesScenario() {
         EdgesAssert(false, 'open-folder row invokes folder picker')
     recent := SendMessage(0x110A, 0, 0, tree)
     EdgesAssert(TreeText(tree, recent) = '# Recent' && recent != FolderGroup(tree), 'recent group remains without root')
+    ; Manual appearance check in both boundary screenshots: New has no circle,
+    ; only a faint plus on the island. Compare with normal New and Refresh;
+    ; screenshot pixels are not an automated assertion of this UI contract.
     EdgesShot('unset')
     FinishSidebarScenario('Edges unset')
 

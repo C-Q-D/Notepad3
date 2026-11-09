@@ -2,7 +2,7 @@
 # The AHK assertions use messages addressed to the test window, never global input.
 param(
     [ValidateSet('A','B','C','D','E','F')][string]$Through = 'F',
-    [ValidateSet('All','C','D','E','F','Groups','Toggles','LongPath','ShortPath','OpenFolder','Recent','Create','Filter','Edges')][string]$Scenario = 'All',
+    [ValidateSet('All','C','D','E','F','Groups','Toggles','LongPath','ShortPath','OpenFolder','Recent','Create','Filter','Edges','Rework','Rework2')][string]$Scenario = 'All',
     [ValidateSet('Light','Dark')][string]$Theme = 'Light',
     [string]$ScreenshotDirectory = '',
     [string]$Executable = (Join-Path $PSScriptRoot '..\Bin\Release_x64_v143\Notepad3.exe'),
@@ -108,6 +108,100 @@ int main(void) {
     return $LASTEXITCODE -ne 0
 }
 
+# Exercise the production result-row renderer against a native TreeView. Record
+# its text output boundary, not pixels: a long relative folder must reach drawing
+# intact before that API applies ellipsis. Allocation stubs preserve real lengths.
+function Test-ResultFolderDrawing([string]$Directory, [string]$Source) {
+    $source = Get-Content -LiteralPath $Source -Raw
+    $parts = foreach ($name in @('_Sidebar_RelativePath', '_Sidebar_AbbreviateFolder', '_Sidebar_DrawResultRow')) {
+        $match = [regex]::Match($source, '(?ms)^(?:static )?[^\r\n]+ ' + $name + '\([^\r\n]*\)\r?\n\{.*?^}')
+        if (!$match.Success) { throw "Missing production drawing function $name" }
+        $match.Value
+    }
+    $harness = @'
+#include <windows.h>
+#include <commctrl.h>
+#include <strsafe.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <wchar.h>
+#define MAX_PATH_EXPLICIT 260
+#define COUNTOF(value) _countof(value)
+#define max_i(a,b) (((a) > (b)) ? (a) : (b))
+#define min_i(a,b) (((a) < (b)) ? (a) : (b))
+typedef LPCWSTR HPATHL;
+#define Path_Get(path) (path)
+#define Path_Copy(path) _wcsdup(path)
+#define Path_GetLength(path) wcslen(path)
+#define Path_Release(path) free((void*)(path))
+// The renderer only needs a mutable copy and its parent, with no filesystem I/O.
+static void Path_RemoveFileSpec(HPATHL path) { LPWSTR tail = wcsrchr((LPWSTR)path, L'\\'); if (tail) *tail = 0; }
+typedef struct String { LPWSTR text; size_t capacity; } *HSTRINGW;
+static HSTRINGW StrgCreate(LPCWSTR value) { (void)value; return calloc(1, sizeof(struct String)); }
+static LPWSTR StrgWriteAccessBuf(HSTRINGW value, size_t length) { value->capacity = length; value->text = calloc(length, sizeof(WCHAR)); return value->text; }
+static size_t StrgGetAllocLength(HSTRINGW value) { return value->capacity; }
+static void StrgDestroy(HSTRINGW value) { free(value->text); free(value); }
+enum { SIDEBAR_FILE, SIDEBAR_RESULT = 7, SIDEBAR_RESULT_CLEAR = 10, SIDEBAR_KIND_MASK = 15, SIDEBAR_COUNT_SHIFT = 4 };
+enum { SidebarFontSmall, SidebarFontBody };
+typedef struct { COLORREF island, selected, rowHot, accent, weak, secondary; } SidebarPalette;
+static SidebarPalette palette = { 1, 2, 3, 4, 5, 6 };
+static SidebarPalette const* s_palette = &palette;
+static struct { LPCWSTR SidebarFolder; } Settings = { L"C:\\fixture" };
+static HWND s_results;
+static HTREEITEM s_resultHot;
+static void* s_drawing = (void*)1;
+static UINT s_dpi = 96, s_resultCount = 1;
+static HPATHL s_resultPaths[1];
+static WCHAR s_query[] = L"target", drawnFolder[32768];
+static int _Sidebar_Pixels(int value) { return value; }
+static int Sidebar_GetStrokeWidth(UINT dpi) { (void)dpi; return 1; }
+static COLORREF _Sidebar_NameColor(LPCWSTR name, LPARAM kind) { (void)name; (void)kind; return 0; }
+static int _Sidebar_MatchName(LPCWSTR name, LPCWSTR query) { (void)name; (void)query; return -1; }
+// Text measurement and surfaces are irrelevant to this text-preservation
+// contract. Capture the actual weak folder column passed by the real renderer.
+static int SidebarDrawing_Measure(HDC dc, void* drawing, LPCWSTR text, int font) { (void)dc; (void)drawing; (void)font; return (int)wcslen(text); }
+static void SidebarDrawing_RoundRect(HDC dc, RECT bounds, int radius, int stroke, COLORREF fill, COLORREF border) { (void)dc; (void)bounds; (void)radius; (void)stroke; (void)fill; (void)border; }
+static void SidebarDrawing_Text(HDC dc, void* drawing, LPCWSTR text, int font, RECT bounds, COLORREF color) {
+    (void)dc; (void)drawing; (void)bounds;
+    if (font == SidebarFontSmall && color == palette.weak) StringCchCopy(drawnFolder, COUNTOF(drawnFolder), text);
+}
+__SOURCE__
+// Three valid 100-character components put the relative folder above MAX_PATH;
+// the expected text is built from the fixture, independently of abbreviation.
+int main(void) {
+    WCHAR path[1024] = L"C:\\fixture", expected[1024] = L"";
+    for (int i = 0; i < 3; ++i) {
+        WCHAR component[101];
+        for (int j = 0; j < 100; ++j) component[j] = (WCHAR)(L'a' + i);
+        component[100] = 0;
+        StringCchCat(path, COUNTOF(path), L"\\"); StringCchCat(path, COUNTOF(path), component);
+        StringCchCat(expected, COUNTOF(expected), component); StringCchCat(expected, COUNTOF(expected), L"\\");
+    }
+    StringCchCat(path, COUNTOF(path), L"\\target.txt"); s_resultPaths[0] = path;
+    INITCOMMONCONTROLSEX controls = { sizeof(controls), ICC_TREEVIEW_CLASSES }; InitCommonControlsEx(&controls);
+    HWND parent = CreateWindowW(L"STATIC", L"", WS_OVERLAPPED, 0, 0, 500, 500, NULL, NULL, NULL, NULL);
+    s_results = CreateWindowW(WC_TREEVIEWW, L"", WS_CHILD | WS_VISIBLE, 0, 0, 300, 300, parent, NULL, NULL, NULL);
+    TVINSERTSTRUCTW insert = { 0 }; insert.hParent = TVI_ROOT; insert.hInsertAfter = TVI_LAST;
+    insert.item.mask = TVIF_TEXT | TVIF_PARAM; insert.item.pszText = L"target.txt"; insert.item.lParam = SIDEBAR_RESULT;
+    HTREEITEM item = TreeView_InsertItem(s_results, &insert);
+    if (!parent || !s_results || !item) { fprintf(stderr, "Native drawing fixture failed\n"); return 2; }
+    NMTVCUSTOMDRAW draw = { 0 }; draw.nmcd.dwItemSpec = (DWORD_PTR)item; draw.nmcd.hdc = GetDC(s_results);
+    _Sidebar_DrawResultRow(&draw);
+    bool const pass = wcscmp(drawnFolder, expected) == 0;
+    printf("%s: F6 result renderer preserves long relative folder column (%zu characters)\n", pass ? "PASS" : "FAIL", wcslen(expected));
+    ReleaseDC(s_results, draw.nmcd.hdc); DestroyWindow(parent); return pass ? 0 : 1;
+}
+'@
+    $file = Join-Path $Directory 'ResultFolder.c'
+    Set-Content -LiteralPath $file -Value $harness.Replace('__SOURCE__', ($parts -join "`r`n")) -Encoding utf8
+    $exe = Join-Path $Directory 'ResultFolder.exe'
+    & cl.exe /nologo /W4 /WX /std:c11 /utf-8 /DUNICODE /D_UNICODE $file "/Fo$Directory\" "/Fe$exe" /link user32.lib comctl32.lib gdi32.lib
+    if ($LASTEXITCODE -ne 0) { throw 'Result folder harness compilation failed' }
+    & $exe
+    return $LASTEXITCODE -ne 0
+}
+
 $temp = Join-Path $env:TEMP ('np3-sidebar-L1-gui-' + [guid]::NewGuid())
 $runner = $null
 $runnerCreated = 0
@@ -116,11 +210,14 @@ $stderrTask = $null
 [void](New-Item -ItemType Directory -Path $temp)
 try {
     $markerFailed = $false
-    if ($Scenario -in @('All', 'Filter')) {
+    if ($Scenario -in @('All', 'Filter', 'Rework')) {
         # Stream assertion output separately from the returned failure flag.
         $markerOutput = @(Test-FilterCurrentMarker $temp $SidebarSource)
         $markerFailed = [bool]$markerOutput[-1]
         $markerOutput | Select-Object -SkipLast 1 | Write-Output
+        $drawingOutput = @(Test-ResultFolderDrawing $temp $SidebarSource)
+        $markerFailed = [bool]$drawingOutput[-1] -or $markerFailed
+        $drawingOutput | Select-Object -SkipLast 1 | Write-Output
     }
     Copy-Item -LiteralPath $Executable -Destination (Join-Path $temp 'Notepad3.exe')
     # Keep the isolated instance's menu and dialog strings with its built executable.

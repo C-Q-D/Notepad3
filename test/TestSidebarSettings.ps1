@@ -14,12 +14,53 @@ using System.Runtime.InteropServices;
 public static class SidebarSettingsWindow {
     [StructLayout(LayoutKind.Sequential)]
     public struct Rect { public int Left, Top, Right, Bottom; }
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-    public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string name, string title);
     [DllImport("user32.dll")]
     public static extern bool GetWindowRect(IntPtr window, out Rect rect);
     [DllImport("user32.dll")]
     public static extern uint GetDpiForWindow(IntPtr window);
+    [DllImport("user32.dll")]
+    public static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll")]
+    public static extern bool PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
+    private delegate bool WindowCallback(IntPtr window, IntPtr parameter);
+    [DllImport("user32.dll")]
+    private static extern bool EnumThreadWindows(uint thread, WindowCallback callback, IntPtr parameter);
+    [DllImport("user32.dll")]
+    private static extern bool EnumChildWindows(IntPtr parent, WindowCallback callback, IntPtr parameter);
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetParent(IntPtr window);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(IntPtr window, System.Text.StringBuilder name, int capacity);
+    // Enumerate direct children by class even across desktops. The explicit
+    // parent keeps another pane's TreeView from satisfying this fixture.
+    public static IntPtr FindChild(IntPtr parent, string name) {
+        IntPtr found = IntPtr.Zero;
+        if (parent == IntPtr.Zero) return found;
+        EnumChildWindows(parent, (window, parameter) => {
+            var actual = new System.Text.StringBuilder(256);
+            GetClassName(window, actual, actual.Capacity);
+            if (GetParent(window) != parent || actual.ToString() != name) return true;
+            found = window;
+            return false;
+        }, IntPtr.Zero);
+        return found;
+    }
+    // Enumerate the fixture's UI threads, because a PowerShell worker thread
+    // can be attached to a different desktop than its newly started process.
+    public static IntPtr FindMain(int process) {
+        IntPtr found = IntPtr.Zero;
+        using (var fixture = System.Diagnostics.Process.GetProcessById(process)) {
+            foreach (System.Diagnostics.ProcessThread thread in fixture.Threads) {
+                EnumThreadWindows((uint)thread.Id, (window, parameter) => {
+                    if (FindChild(window, "Notepad3Sidebar") == IntPtr.Zero) return true;
+                    found = window;
+                    return false;
+                }, IntPtr.Zero);
+                if (found != IntPtr.Zero) break;
+            }
+        }
+        return found;
+    }
 }
 '@
 
@@ -56,7 +97,7 @@ function Read-FixtureSettings {
 .SYNOPSIS
 Start the isolated executable and close it normally to exercise SaveAllSettings.
 .OUTPUTS
-The visible tree width in 96-DPI logical pixels.
+The visible panel width in 96-DPI logical pixels.
 .NOTES
 Timeouts fail without killing a process; the caller retains cleanup responsibility.
 #>
@@ -67,28 +108,32 @@ function Invoke-Fixture {
     [void]$info.ArgumentList.Add('/n')
     $script:process = [Diagnostics.Process]::Start($info)
     $script:created = $process.StartTime.ToFileTimeUtc()
+    "$($process.Id)|$created" | Set-Content -LiteralPath (Join-Path $temp 'process.txt')
     if (!$process.WaitForInputIdle(15000)) { throw 'Fixture UI did not become idle within 15 seconds' }
     $deadline = [DateTime]::UtcNow.AddSeconds(15)
     do {
         if ($process.HasExited) { throw 'Fixture exited before its main window appeared' }
         $process.Refresh()
-        $main = $process.MainWindowHandle
-        $tree = if ($main -ne [IntPtr]::Zero) {
-            [SidebarSettingsWindow]::FindWindowEx($main, [IntPtr]::Zero, 'SysTreeView32', $null)
+        $main = [SidebarSettingsWindow]::FindMain($process.Id)
+        $panel = [SidebarSettingsWindow]::FindChild($main, 'Notepad3Sidebar')
+        $tree = if ($main -ne [IntPtr]::Zero -and $panel -ne [IntPtr]::Zero) {
+            [SidebarSettingsWindow]::FindChild($panel, 'SysTreeView32')
         } else { [IntPtr]::Zero }
-        if ($tree -ne [IntPtr]::Zero) { break }
+        $readyRect = [SidebarSettingsWindow+Rect]::new()
+        if ($tree -ne [IntPtr]::Zero -and [SidebarSettingsWindow]::IsWindowVisible($panel) -and
+            [SidebarSettingsWindow]::GetWindowRect($panel, [ref]$readyRect) -and $readyRect.Right -gt $readyRect.Left) { break }
         Start-Sleep -Milliseconds 25
     } while ([DateTime]::UtcNow -lt $deadline)
     if ($tree -eq [IntPtr]::Zero) { throw 'Fixture tree did not appear within 15 seconds' }
     $rect = [SidebarSettingsWindow+Rect]::new()
-    if (![SidebarSettingsWindow]::GetWindowRect($tree, [ref]$rect)) { throw 'Cannot measure fixture tree' }
+    if (![SidebarSettingsWindow]::GetWindowRect($panel, [ref]$rect)) { throw 'Cannot measure fixture panel' }
     $dpi = [SidebarSettingsWindow]::GetDpiForWindow($main)
     if (!$dpi) { throw 'Cannot read fixture DPI' }
     $width = ($rect.Right - $rect.Left) * 96.0 / $dpi
     if ($process.StartTime.ToFileTimeUtc() -ne $created -or $process.Path -ne (Join-Path $temp 'Notepad3.exe')) {
         throw 'Fixture process identity changed before normal close'
     }
-    if (!$process.CloseMainWindow()) { throw 'Cannot request normal fixture close' }
+    if (![SidebarSettingsWindow]::PostMessage($main, 0x10, [IntPtr]::Zero, [IntPtr]::Zero)) { throw 'Cannot request normal fixture close' }
     if (!$process.WaitForExit(15000)) { throw 'Fixture did not exit normally within 15 seconds' }
     if ($process.ExitCode -ne 0) { throw "Fixture exit code: $($process.ExitCode)" }
     return $width
@@ -192,6 +237,9 @@ SidebarRecentHidden=$hidden
     $null = Invoke-Fixture
     $saved = Read-FixtureSettings
     Assert-Setting ($saved.SidebarRecentHidden -ceq $hidden32) 'hidden list retains the first 32 paths without a partial path'
+} catch {
+    Write-Output $_
+    throw
 } finally {
     # PID, creation time and executable path must all match before requesting close.
     if ($process -and !$process.HasExited) {
@@ -199,7 +247,10 @@ SidebarRecentHidden=$hidden
         if ($process.StartTime.ToFileTimeUtc() -ne $created -or $process.Path -ne (Join-Path $temp 'Notepad3.exe')) {
             throw 'Fixture process identity changed; leave it and its files intact'
         }
-        [void]$process.CloseMainWindow()
+        $main = [SidebarSettingsWindow]::FindMain($process.Id)
+        if ($main -ne [IntPtr]::Zero) {
+            [void][SidebarSettingsWindow]::PostMessage($main, 0x10, [IntPtr]::Zero, [IntPtr]::Zero)
+        }
         if (!$process.WaitForExit(15000)) { throw "Fixture still running; files retained at $temp" }
     }
     # Delete only the unique directory created by this run, never the shared TEMP root.

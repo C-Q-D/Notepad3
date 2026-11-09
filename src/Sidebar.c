@@ -23,7 +23,7 @@ static UINT s_dpi = 96;
 static int s_hover = 0;
 static WCHAR s_hint[MAX_PATH_EXPLICIT];
 // Persistent root status survives the next input that clears a transient hint.
-static WCHAR s_rootStatus[MAX_PATH_EXPLICIT];
+static HSTRINGW s_rootStatus = NULL;
 enum { SIDEBAR_ROOT_UNSET, SIDEBAR_ROOT_MISSING, SIDEBAR_ROOT_READY };
 static int s_rootState = SIDEBAR_ROOT_UNSET;
 static int s_widthTier = 0;
@@ -92,7 +92,7 @@ static void _Sidebar_SetHint(LPCWSTR text)
     if (!text && !s_hint[0]) { return; }
     StringCchCopy(s_hint, COUNTOF(s_hint), text ? text : L"");
     if (s_panel) {
-        SetWindowText(s_panel, *s_hint ? s_hint : s_rootStatus);
+        SetWindowText(s_panel, *s_hint ? s_hint : StrgGet(s_rootStatus));
         InvalidateRect(s_panel, NULL, FALSE);
     }
 }
@@ -1159,6 +1159,7 @@ void Sidebar_SetRoot(const HPATHL folder)
     }
     Path_Release(normalized);
     _Sidebar_UpdateChrome();
+    _Sidebar_LayoutChildren();
     if (s_query[0]) { _Sidebar_FilterChanged(); }
 }
 
@@ -1197,22 +1198,27 @@ typedef struct SidebarExpanded {
     struct SidebarExpanded* next;
 } SidebarExpanded;
 
+// Rebuild the groups while retaining recent selection even without a usable root.
+// Directory expansion is retained only for an available root; failed state
+// allocation leaves the original tree and its selection intact.
 void Sidebar_Refresh(void)
 {
     if (!s_tree || !s_folders) {
         return;
     }
-    if (s_rootState != SIDEBAR_ROOT_READY || !Path_IsExistingDirectory(Settings.SidebarFolder)) {
-        Sidebar_SetRoot(Settings.SidebarFolder);
-        Sidebar_SyncToFile(Paths.CurrentFile, false);
-        return;
-    }
-    bool const recentSelected = TreeView_GetSelection(s_tree) == s_recent;
-    HPATHL selected = _Sidebar_ItemPath(TreeView_GetSelection(s_tree));
+    HTREEITEM const selection = TreeView_GetSelection(s_tree);
+    TVITEMW selectedItem = { 0 };
+    selectedItem.mask = TVIF_PARAM;
+    selectedItem.hItem = selection;
+    TreeView_GetItem(s_tree, &selectedItem);
+    LPARAM const selectedKind = selectedItem.lParam & SIDEBAR_KIND_MASK;
+    bool const recentSelected = selection == s_recent;
+    HPATHL selected = _Sidebar_ItemPath(selection);
+    bool const rootAvailable = s_rootState == SIDEBAR_ROOT_READY && Path_IsExistingDirectory(Settings.SidebarFolder);
     SidebarExpanded* expanded = NULL;
     HTREEITEM const root = s_folders;
     bool const rootExpanded = (TreeView_GetItemState(s_tree, root, TVIS_EXPANDED) & TVIS_EXPANDED) != 0;
-    HTREEITEM item = root;
+    HTREEITEM item = rootAvailable ? root : NULL;
     while (item) {
         if (TreeView_GetItemState(s_tree, item, TVIS_EXPANDED) & TVIS_EXPANDED) {
             SidebarExpanded* saved = AllocMem(sizeof(*saved), HEAP_ZERO_MEMORY);
@@ -1239,6 +1245,9 @@ void Sidebar_Refresh(void)
         item = next;
     }
     Sidebar_SetRoot(Settings.SidebarFolder);
+    if (!rootAvailable) {
+        Sidebar_SyncToFile(Paths.CurrentFile, false);
+    }
     while (expanded) {
         SidebarExpanded* next = expanded->next;
         HTREEITEM const found = _Sidebar_FindPath(expanded->path, false, true);
@@ -1250,8 +1259,25 @@ void Sidebar_Refresh(void)
     s_restoreGroupCollapse = false;
     // Child enumeration already restores the current-file handle where visible;
     // looking up that file here would reopen an intentionally collapsed parent.
-    TreeView_SelectItem(s_tree, recentSelected ? s_recent : (Path_IsNotEmpty(selected) ? _Sidebar_FindPath(selected, false, true) : NULL));
-    if (!rootExpanded) {
+    HTREEITEM restored = recentSelected ? s_recent : NULL;
+    if (selectedKind == SIDEBAR_RECENT_ITEM && Path_IsNotEmpty(selected)) {
+        // Restore within the same group; recent selection must not reveal an
+        // unrelated tree row or expand its intentionally collapsed ancestors.
+        for (HTREEITEM child = TreeView_GetChild(s_tree, s_recent); child; child = TreeView_GetNextSibling(s_tree, child)) {
+            HPATHL path = _Sidebar_ItemPath(child);
+            bool const same = Path_IsNotEmpty(path) && Path_StrgComparePath(path, selected, Paths.WorkingDirectory, true) == 0;
+            Path_Release(path);
+            if (same) { restored = child; break; }
+        }
+    } else if (rootAvailable && !recentSelected && Path_IsNotEmpty(selected)) {
+        restored = _Sidebar_FindPath(selected, false, true);
+    }
+    // Boundary sync still supplies selection when a missing root recovers.
+    // A saved recent identity takes precedence over that directory-only sync.
+    if (rootAvailable || recentSelected || selectedKind == SIDEBAR_RECENT_ITEM) {
+        TreeView_SelectItem(s_tree, restored);
+    }
+    if (rootAvailable && !rootExpanded) {
         _Sidebar_CollapseDirectory(s_folders);
     }
     Path_Release(selected);
@@ -1454,16 +1480,31 @@ static INT_PTR CALLBACK _Sidebar_NewFileProc(HWND dialog, UINT message, WPARAM w
 static void _Sidebar_NewFile(void)
 {
     if (!Path_IsExistingDirectory(Settings.SidebarFolder)) { return; }
-    // Hint rows have no path of their own; an empty-folder hint targets its folder.
-    HTREEITEM target = TreeView_GetSelection(s_tree);
-    WCHAR name[MAX_PATH_EXPLICIT];
-    LPARAM kind = 0;
-    if (target && _Sidebar_GetItem(target, name, COUNTOF(name), &kind) && kind == SIDEBAR_EMPTY) {
-        target = TreeView_GetParent(s_tree, target);
+    HPATHL folder = Path_Allocate(NULL);
+    if (s_query[0]) {
+        TVITEMW value = { 0 };
+        value.mask = TVIF_PARAM;
+        value.hItem = TreeView_GetSelection(s_results);
+        if (TreeView_GetItem(s_results, &value) && (value.lParam & SIDEBAR_KIND_MASK) == SIDEBAR_RESULT) {
+            UINT const index = (UINT)(value.lParam >> SIDEBAR_COUNT_SHIFT);
+            if (index < s_resultCount) {
+                Path_Reset(folder, Path_Get(s_resultPaths[index]));
+                Path_RemoveFileSpec(folder);
+            }
+        }
+    } else {
+        // An empty-folder hint targets its parent; other pathless rows use root.
+        HTREEITEM target = TreeView_GetSelection(s_tree);
+        WCHAR name[MAX_PATH_EXPLICIT];
+        LPARAM kind = 0;
+        if (target && _Sidebar_GetItem(target, name, COUNTOF(name), &kind) && kind == SIDEBAR_EMPTY) {
+            target = TreeView_GetParent(s_tree, target);
+        }
+        Path_Release(folder);
+        folder = _Sidebar_ItemPath(target);
+        if (kind == SIDEBAR_FILE || kind == SIDEBAR_RECENT_ITEM) { Path_RemoveFileSpec(folder); }
     }
-    HPATHL folder = _Sidebar_ItemPath(target);
     if (Path_IsEmpty(folder)) { Path_Reset(folder, Path_Get(Settings.SidebarFolder)); }
-    else if (kind == SIDEBAR_FILE || kind == SIDEBAR_RECENT_ITEM) { Path_RemoveFileSpec(folder); }
     if (!Path_IsExistingDirectory(folder)) { Path_Release(folder); return; }
     DWORD storage[128] = { 0 };
     DLGTEMPLATE* const layout = (DLGTEMPLATE*)storage;
@@ -1523,7 +1564,7 @@ static void _Sidebar_ActivateResult(HTREEITEM item)
         SetWindowTextW(s_filter, L"");
     } else if (kind == SIDEBAR_RESULT) {
         UINT const index = (UINT)(row.lParam >> SIDEBAR_COUNT_SHIFT);
-        if (index < s_resultCount && !_Sidebar_IsBinary(Path_FindFileName(s_resultPaths[index]))) {
+        if (index < s_resultCount) {
             _Sidebar_OpenFile(s_resultPaths[index]);
         }
     }
@@ -1620,14 +1661,16 @@ static void _Sidebar_DrawResultRow(NMTVCUSTOMDRAW* draw)
         if (index < s_resultCount) {
             HPATHL folder = Path_Copy(s_resultPaths[index]);
             Path_RemoveFileSpec(folder);
-            WCHAR abbreviated[MAX_PATH_EXPLICIT];
-            if (_Sidebar_AbbreviateFolder(Path_Get(Settings.SidebarFolder), Path_Get(folder), abbreviated, COUNTOF(abbreviated))) {
+            HSTRINGW folderLabel = StrgCreate(NULL);
+            LPWSTR const abbreviated = StrgWriteAccessBuf(folderLabel, Path_GetLength(folder) + 4);
+            if (_Sidebar_AbbreviateFolder(Path_Get(Settings.SidebarFolder), Path_Get(folder), abbreviated, StrgGetAllocLength(folderLabel))) {
                 int const folderWidth = min_i((text.right - text.left) / 2, SidebarDrawing_Measure(dc, s_drawing, abbreviated, SidebarFontSmall));
                 RECT where = text;
                 where.left = where.right - folderWidth;
                 SidebarDrawing_Text(dc, s_drawing, abbreviated, SidebarFontSmall, where, p->weak);
                 text.right = max_i(text.left, where.left - _Sidebar_Pixels(10));
             }
+            StrgDestroy(folderLabel);
             Path_Release(folder);
             SidebarDrawing_Text(dc, s_drawing, name, SidebarFontBody, text, _Sidebar_NameColor(name, SIDEBAR_FILE));
             int const match = _Sidebar_MatchName(name, s_query);
@@ -1666,28 +1709,17 @@ static void _Sidebar_DrawResultRow(NMTVCUSTOMDRAW* draw)
 // Keep the hover action after the group title at every width/DPI. Return empty
 // bounds when it cannot fit, so an invisible action never intercepts title clicks.
 // Drawing and activation share these exact bounds.
-static RECT _Sidebar_CollapseRect(HDC dc, RECT row)
+static RECT _Sidebar_GroupActionRect(HDC dc, RECT row, bool recent)
 {
     WCHAR text[128], name[128], title[256];
-    GetLngString(IDS_MUI_SIDEBAR_COLLAPSE_ALL, text, COUNTOF(text));
-    GetLngString(IDS_MUI_SIDEBAR_FOLDERS_TITLE, name, COUNTOF(name));
-    bool const expanded = (TreeView_GetItemState(s_tree, s_folders, TVIS_EXPANDED) & TVIS_EXPANDED) != 0;
+    GetLngString(recent ? IDS_MUI_SIDEBAR_CLEAR_RECENT : IDS_MUI_SIDEBAR_COLLAPSE_ALL, text, COUNTOF(text));
+    GetLngString(recent ? IDS_MUI_SIDEBAR_RECENT_TITLE : IDS_MUI_SIDEBAR_FOLDERS_TITLE, name, COUNTOF(name));
+    bool const expanded = recent ? !Settings.SidebarRecentCollapsed : (TreeView_GetItemState(s_tree, s_folders, TVIS_EXPANDED) & TVIS_EXPANDED) != 0;
     StringCchPrintf(title, COUNTOF(title), L"%s  %s", name, expanded ? L"\x2212" : L"+");
     int const titleEnd = row.left + _Sidebar_Pixels(10) + SidebarDrawing_Measure(dc, s_drawing, title, SidebarFontSmall) + _Sidebar_Pixels(8);
     row.right -= _Sidebar_Pixels(10);
-    row.left = max_i(titleEnd, row.right - SidebarDrawing_Measure(dc, s_drawing, text, SidebarFontSmall));
-    if (row.left > row.right) { row.left = row.right; }
-    return row;
-}
-
-// Match the clear action's drawn width at the right edge of the recent header.
-// dc and row use tree-client pixels; callers release their borrowed DC.
-static RECT _Sidebar_RecentClearRect(HDC dc, RECT row)
-{
-    WCHAR text[128];
-    GetLngString(IDS_MUI_SIDEBAR_CLEAR_RECENT, text, COUNTOF(text));
-    row.right -= _Sidebar_Pixels(10);
-    row.left = max_i(_Sidebar_Pixels(10), row.right - SidebarDrawing_Measure(dc, s_drawing, text, SidebarFontSmall));
+    row.left = row.right - SidebarDrawing_Measure(dc, s_drawing, text, SidebarFontSmall);
+    if (row.left < titleEnd) { SetRectEmpty(&row); }
     return row;
 }
 
@@ -1755,7 +1787,7 @@ static void _Sidebar_ActivateRow(HTREEITEM item, POINT point)
             GetClientRect(s_tree, &client);
             row.right = client.right;
             HDC dc = GetDC(s_tree);
-            RECT const action = _Sidebar_RecentClearRect(dc, row);
+            RECT const action = _Sidebar_GroupActionRect(dc, row, true);
             ReleaseDC(s_tree, dc);
             if (PtInRect(&action, point)) { _Sidebar_ClearRecent(); return; }
         }
@@ -1768,7 +1800,7 @@ static void _Sidebar_ActivateRow(HTREEITEM item, POINT point)
         GetClientRect(s_tree, &client);
         row.right = client.right;
         HDC dc = GetDC(s_tree);
-        RECT const action = _Sidebar_CollapseRect(dc, row);
+        RECT const action = _Sidebar_GroupActionRect(dc, row, false);
         ReleaseDC(s_tree, dc);
         if (PtInRect(&action, point)) { _Sidebar_CollapseAll(s_folders); }
         else if (TreeView_GetItemState(s_tree, item, TVIS_EXPANDED) & TVIS_EXPANDED) { _Sidebar_CollapseDirectory(item); }
@@ -1865,7 +1897,7 @@ static void _Sidebar_DrawRow(NMTVCUSTOMDRAW* draw)
         if (item == s_recent && item == s_hotItem && s_recentCount) {
             WCHAR clear[128];
             GetLngString(IDS_MUI_SIDEBAR_CLEAR_RECENT, clear, COUNTOF(clear));
-            SidebarDrawing_Text(dc, s_drawing, clear, SidebarFontSmall, _Sidebar_RecentClearRect(dc, row), p->accent);
+            SidebarDrawing_Text(dc, s_drawing, clear, SidebarFontSmall, _Sidebar_GroupActionRect(dc, row, true), p->accent);
         } else if (item == s_folders && s_rootState == SIDEBAR_ROOT_READY && (s_widthTier == 0 || item == s_hotItem)) {
             WCHAR right[128];
             if (item == s_hotItem) { GetLngString(IDS_MUI_SIDEBAR_COLLAPSE_ALL, right, COUNTOF(right)); }
@@ -1874,7 +1906,7 @@ static void _Sidebar_DrawRow(NMTVCUSTOMDRAW* draw)
                 GetLngString(IDS_MUI_SIDEBAR_COUNTS, format, COUNTOF(format));
                 StringCchPrintf(right, COUNTOF(right), format, s_rootDirectories, s_rootFiles);
             }
-            if (item == s_hotItem) { text = _Sidebar_CollapseRect(dc, row); }
+            if (item == s_hotItem) { text = _Sidebar_GroupActionRect(dc, row, false); }
             else {
                 int const titleWidth = SidebarDrawing_Measure(dc, s_drawing, title, SidebarFontSmall);
                 text.left = max_i(text.left + titleWidth + _Sidebar_Pixels(8), text.right - SidebarDrawing_Measure(dc, s_drawing, right, SidebarFontSmall));
@@ -2101,19 +2133,20 @@ static void _Sidebar_UpdateChrome(void)
     GetLngString(hasRoot ? IDS_MUI_SIDEBAR_FILTER_HINT : IDS_MUI_SIDEBAR_FILTER_NO_ROOT, hint, COUNTOF(hint));
     SendMessage(s_filter, EM_SETCUEBANNER, FALSE, (LPARAM)hint);
     EnableWindow(s_filter, hasRoot);
-    s_rootStatus[0] = L'\0';
+    StrgEmpty(s_rootStatus, false);
     if (!hasRoot) {
         if (Path_IsEmpty(Settings.SidebarFolder)) {
-            GetLngString(IDS_MUI_SIDEBAR_NO_FOLDER, s_rootStatus, COUNTOF(s_rootStatus));
+            GetLngString(IDS_MUI_SIDEBAR_NO_FOLDER, hint, COUNTOF(hint));
+            StrgReset(s_rootStatus, hint);
         } else {
             WCHAR format[128];
             GetLngString(IDS_MUI_SIDEBAR_FOLDER_MISSING_PATH, format, COUNTOF(format));
-            StringCchPrintf(s_rootStatus, COUNTOF(s_rootStatus), format, Path_Get(Settings.SidebarFolder));
+            StrgFormat(s_rootStatus, format, Path_Get(Settings.SidebarFolder));
         }
         // A disabled filter must not leave its results in front of recovery rows.
         if (GetWindowTextLengthW(s_filter)) { SetWindowTextW(s_filter, L""); }
     }
-    SetWindowText(s_panel, *s_hint ? s_hint : s_rootStatus);
+    SetWindowText(s_panel, *s_hint ? s_hint : StrgGet(s_rootStatus));
     InvalidateRect(s_panel, NULL, FALSE);
 }
 
@@ -2164,7 +2197,7 @@ static void _Sidebar_Paint(HDC dc)
     LPCWSTR const relative = Path_IsNotEmpty(Settings.SidebarFolder) ? _Sidebar_RelativePath(Path_Get(Settings.SidebarFolder), current) : NULL;
     if (relative) { current = relative; }
     RECT pathRect = { badgeWidth + _Sidebar_Pixels(8), statusTop, (s_widthTier == 2 ? client.right : s_hiddenRect.left) - _Sidebar_Pixels(8), client.bottom };
-    SidebarDrawing_Text(dc, s_drawing, *s_hint ? s_hint : (*s_rootStatus ? s_rootStatus : current), SidebarFontSmall, pathRect,
+    SidebarDrawing_Text(dc, s_drawing, *s_hint ? s_hint : (StrgIsNotEmpty(s_rootStatus) ? StrgGet(s_rootStatus) : current), SidebarFontSmall, pathRect,
                         *s_hint || s_rootState == SIDEBAR_ROOT_MISSING ? p->hint : p->secondary);
     RestoreDC(dc, saved);
 
@@ -2194,9 +2227,11 @@ static void _Sidebar_Paint(HDC dc)
     Path_Release(parent);
     if (s_widthTier != 2) {
         bool const canCreate = s_rootState == SIDEBAR_ROOT_READY;
-        SidebarDrawing_RoundRect(dc, s_newRect, _Sidebar_Pixels(15), strokeWidth, canCreate && s_hover == 1 ? p->buttonHot : p->button, CLR_INVALID);
+        if (canCreate) {
+            SidebarDrawing_RoundRect(dc, s_newRect, _Sidebar_Pixels(15), strokeWidth, s_hover == 1 ? p->buttonHot : p->button, CLR_INVALID);
+        }
         SidebarDrawing_RoundRect(dc, s_refreshRect, _Sidebar_Pixels(15), strokeWidth, s_hover == 2 ? p->buttonHot : p->button, CLR_INVALID);
-        SidebarDrawing_Icon(dc, s_newRect, false, canCreate ? p->secondary : p->weak, s_dpi);
+        SidebarDrawing_Icon(dc, s_newRect, false, canCreate ? p->secondary : p->prefix, s_dpi);
         SidebarDrawing_Icon(dc, s_refreshRect, true, p->secondary, s_dpi);
     }
     bool const focused = GetFocus() == s_filter;
@@ -2359,6 +2394,8 @@ static LRESULT CALLBACK _Sidebar_PanelProc(HWND hwnd, UINT message, WPARAM wPara
         break;
     case WM_NCDESTROY:
         s_panel = s_filter = s_tooltip = NULL;
+        StrgDestroy(s_rootStatus);
+        s_rootStatus = NULL;
         SidebarDrawing_Destroy(s_drawing);
         s_drawing = NULL;
         return 0;
@@ -2415,9 +2452,12 @@ bool Sidebar_Create(HWND parent)
     s_dpi = Scintilla_GetWindowDPI(parent);
     s_drawing = SidebarDrawing_Create(s_dpi);
     if (!s_drawing) { return false; }
+    s_rootStatus = StrgCreate(NULL);
     s_panel = CreateWindowEx(0, panelClass.lpszClassName, NULL, WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
                             0, 0, 0, 0, parent, NULL, Globals.hInstance, NULL);
     if (!s_panel) {
+        StrgDestroy(s_rootStatus);
+        s_rootStatus = NULL;
         SidebarDrawing_Destroy(s_drawing);
         s_drawing = NULL;
         return false;
